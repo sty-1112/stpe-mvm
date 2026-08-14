@@ -1,0 +1,94 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Packaging and build artifacts
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local environment files
+.venv/
+venv/
+env/
+envs/
+.env
+.env.*
+!.env.example
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# Slurm scripts and scheduler output
+/slurm_scripts/
+/scripts/slurm/
+slurm-*.out
+slurm-*.err
+*.stdout
+*.stderr
+
+# Logs and experiment trackers
+/log/
+/logs/
+/runs/
+/wandb/
+/tensorboard/
+*.log
+
+# Checkpoints and experiment outputs
+/checkpoint/
+/checkpoints/
+/output/
+/outputs/
+/results/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Datasets, extracted videos, and large generated arrays
+/data/
+/datasets/
+/videos/
+/videos_mp4/
+/videos_webm/
+*.mp4
+*.webm
+*.avi
+*.mkv
+*.npy
+*.npz
+*.pkl
+
+# Downloaded archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# Local caches and temporary files
+.cache/
+.triton/
+.deepspeed/
+/tmp/
+/temp/
+*.tmp
+*.pid
+
+# Crash dumps
+core
+core.*
+*.core
