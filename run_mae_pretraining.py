@@ -29,6 +29,19 @@ def get_args():
     parser.add_argument('--decoder_depth', default=4, type=int,
                         help='depth of decoder')
 
+    parser.add_argument('--pos_mode', default='original',
+                        choices=['original', 'hwt_rope', 'hwf_rope'],
+                        help='encoder positional encoding mode')
+    parser.add_argument('--rope_axis_dims', default=[20, 20, 24], type=int, nargs=3,
+                        metavar=('H_DIM', 'W_DIM', 'T_DIM'),
+                        help='RoPE dimensions assigned to h, w, and t/f')
+    parser.add_argument('--rope_theta', default=10000.0, type=float,
+                        help='RoPE frequency base')
+    parser.add_argument('--stpe_window_size', default=5, type=int,
+                        help='local window used by the STPE statistic')
+    parser.add_argument('--stpe_noise_mode', default='db4', choices=['db4', 'none'],
+                        help='STPE observation-noise estimator')
+
     parser.add_argument('--mask_type', default='tube', choices=['random', 'tube'],
                         type=str, help='masked strategy of video tokens/patches')
 
@@ -126,7 +139,13 @@ def get_model(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         decoder_depth=args.decoder_depth,
-        use_checkpoint=args.use_checkpoint
+        use_checkpoint=args.use_checkpoint,
+        num_frames=args.num_frames,
+        pos_mode=args.pos_mode,
+        rope_axis_dims=tuple(args.rope_axis_dims),
+        rope_theta=args.rope_theta,
+        stpe_window_size=args.stpe_window_size,
+        stpe_noise_mode=args.stpe_noise_mode,
     )
     return model
 

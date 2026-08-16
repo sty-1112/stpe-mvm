@@ -7,6 +7,13 @@ from timm.models.layers import drop_path, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 import torch.utils.checkpoint as checkpoint
 
+from stpe_rope import (
+    VideoSTPE,
+    apply_3d_rope,
+    build_3d_coordinates,
+    validate_pos_mode,
+)
+
 
 def _cfg(url='', **kwargs):
     return {
@@ -55,7 +62,8 @@ class Mlp(nn.Module):
 class Attention(nn.Module):
     def __init__(
             self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0.,
-            proj_drop=0., attn_head_dim=None):
+            proj_drop=0., attn_head_dim=None, rope_axis_dims=(20, 20, 24),
+            rope_theta=10000.0):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -63,6 +71,8 @@ class Attention(nn.Module):
             head_dim = attn_head_dim
         all_head_dim = head_dim * self.num_heads
         self.scale = qk_scale or head_dim ** -0.5
+        self.rope_axis_dims = tuple(rope_axis_dims)
+        self.rope_theta = float(rope_theta)
 
         self.qkv = nn.Linear(dim, all_head_dim * 3, bias=False)
         if qkv_bias:
@@ -76,7 +86,7 @@ class Attention(nn.Module):
         self.proj = nn.Linear(all_head_dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
+    def forward(self, x, rope_coords=None):
         B, N, C = x.shape
         qkv_bias = None
         if self.q_bias is not None:
@@ -86,6 +96,14 @@ class Attention(nn.Module):
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
+        if rope_coords is not None:
+            q, k = apply_3d_rope(
+                q,
+                k,
+                rope_coords,
+                axis_dims=self.rope_axis_dims,
+                theta=self.rope_theta,
+            )
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
 
@@ -103,12 +121,13 @@ class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., init_values=None, act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-                 attn_head_dim=None):
+                 attn_head_dim=None, rope_axis_dims=(20, 20, 24), rope_theta=10000.0):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
-            attn_drop=attn_drop, proj_drop=drop, attn_head_dim=attn_head_dim)
+            attn_drop=attn_drop, proj_drop=drop, attn_head_dim=attn_head_dim,
+            rope_axis_dims=rope_axis_dims, rope_theta=rope_theta)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -121,12 +140,12 @@ class Block(nn.Module):
         else:
             self.gamma_1, self.gamma_2 = None, None
 
-    def forward(self, x):
+    def forward(self, x, rope_coords=None):
         if self.gamma_1 is None:
-            x = x + self.drop_path(self.attn(self.norm1(x)))
+            x = x + self.drop_path(self.attn(self.norm1(x), rope_coords))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
         else:
-            x = x + self.drop_path(self.gamma_1 * self.attn(self.norm1(x)))
+            x = x + self.drop_path(self.gamma_1 * self.attn(self.norm1(x), rope_coords))
             x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
         return x
 
@@ -139,7 +158,12 @@ class PatchEmbed(nn.Module):
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
         self.tubelet_size = int(tubelet_size)
-        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0]) * (num_frames // self.tubelet_size)
+        self.grid_size = (
+            num_frames // self.tubelet_size,
+            img_size[0] // patch_size[0],
+            img_size[1] // patch_size[1],
+        )
+        num_patches = self.grid_size[0] * self.grid_size[1] * self.grid_size[2]
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = num_patches
@@ -195,7 +219,12 @@ class VisionTransformer(nn.Module):
                  all_frames=16,
                  tubelet_size=2,
                  use_checkpoint=False,
-                 use_mean_pooling=True):
+                 use_mean_pooling=True,
+                 pos_mode="original",
+                 rope_axis_dims=(20, 20, 24),
+                 rope_theta=10000.0,
+                 stpe_window_size=5,
+                 stpe_noise_mode="db4"):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -204,6 +233,13 @@ class VisionTransformer(nn.Module):
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, num_frames=all_frames, tubelet_size=self.tubelet_size)
         num_patches = self.patch_embed.num_patches
         self.use_checkpoint = use_checkpoint
+        self.pos_mode = validate_pos_mode(pos_mode)
+        self.rope_axis_dims = tuple(rope_axis_dims)
+        self.rope_theta = float(rope_theta)
+        self.stpe = VideoSTPE(
+            window_size=stpe_window_size,
+            noise_mode=stpe_noise_mode,
+        ) if self.pos_mode == "hwf_rope" else None
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
@@ -219,7 +255,8 @@ class VisionTransformer(nn.Module):
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
-                init_values=init_values)
+                init_values=init_values, rope_axis_dims=self.rope_axis_dims,
+                rope_theta=self.rope_theta)
             for i in range(depth)])
         self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
@@ -260,18 +297,42 @@ class VisionTransformer(nn.Module):
 
     def forward_features(self, x):
         x = self.patch_embed(x)
-        B, _, _ = x.size()
+        B, _, C = x.size()
+        time_size, height, width = self.patch_embed.grid_size
+        rope_coords = None
 
-        if self.pos_embed is not None:
+        if self.pos_mode == "original" and self.pos_embed is not None:
             x = x + self.pos_embed.expand(B, -1, -1).type_as(x).to(x.device).clone().detach()
+        elif self.pos_mode == "hwt_rope":
+            temporal_coordinate = torch.arange(
+                time_size, device=x.device, dtype=torch.float32
+            ).unsqueeze(0).expand(B, -1)
+            rope_coords = build_3d_coordinates(
+                B,
+                (time_size, height, width),
+                temporal_coordinate,
+                x.device,
+            )
+        elif self.pos_mode == "hwf_rope":
+            x_grid = x.reshape(B, time_size, height, width, C)
+            temporal_coordinate = self.stpe(x_grid.detach(), masked_pos=None)
+            rope_coords = build_3d_coordinates(
+                B,
+                (time_size, height, width),
+                temporal_coordinate,
+                x.device,
+            )
         x = self.pos_drop(x)
 
         if self.use_checkpoint:
             for blk in self.blocks:
-                x = checkpoint.checkpoint(blk, x)
+                if rope_coords is None:
+                    x = checkpoint.checkpoint(blk, x)
+                else:
+                    x = checkpoint.checkpoint(blk, x, rope_coords)
         else:   
             for blk in self.blocks:
-                x = blk(x)
+                x = blk(x, rope_coords)
 
         x = self.norm(x)
         if self.fc_norm is not None:

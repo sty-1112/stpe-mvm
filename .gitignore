@@ -92,3 +92,5 @@ slurm-*.err
 core
 core.*
 *.core
+
+/data_smoke/

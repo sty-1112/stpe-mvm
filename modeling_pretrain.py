@@ -9,6 +9,8 @@ from modeling_finetune import Block, _cfg, PatchEmbed, get_sinusoid_encoding_tab
 from timm.models.registry import register_model
 from timm.models.layers import trunc_normal_ as __call_trunc_normal_
 
+from stpe_rope import VideoSTPE, build_3d_coordinates, validate_pos_mode
+
 
 
 def trunc_normal_(tensor, mean=0., std=1.):
@@ -29,14 +31,24 @@ class PretrainVisionTransformerEncoder(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=nn.LayerNorm, init_values=None, tubelet_size=2, use_checkpoint=False,
-                 use_learnable_pos_emb=False):
+                 use_learnable_pos_emb=False, num_frames=16, pos_mode="original",
+                 rope_axis_dims=(20, 20, 24), rope_theta=10000.0,
+                 stpe_window_size=5, stpe_noise_mode="db4"):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.patch_embed = PatchEmbed(
-            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,tubelet_size=tubelet_size)
+            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
+            num_frames=num_frames, tubelet_size=tubelet_size)
         num_patches = self.patch_embed.num_patches
         self.use_checkpoint = use_checkpoint
+        self.pos_mode = validate_pos_mode(pos_mode)
+        self.rope_axis_dims = tuple(rope_axis_dims)
+        self.rope_theta = float(rope_theta)
+        self.stpe = VideoSTPE(
+            window_size=stpe_window_size,
+            noise_mode=stpe_noise_mode,
+        ) if self.pos_mode == "hwf_rope" else None
 
 
         # TODO: Add the cls token
@@ -51,7 +63,8 @@ class PretrainVisionTransformerEncoder(nn.Module):
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
-                init_values=init_values)
+                init_values=init_values, rope_axis_dims=self.rope_axis_dims,
+                rope_theta=self.rope_theta)
             for i in range(depth)])
         self.norm =  norm_layer(embed_dim)
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
@@ -86,20 +99,56 @@ class PretrainVisionTransformerEncoder(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x, mask):
-        _, _, T, _, _ = x.shape
         x = self.patch_embed(x)
-        
-        x = x + self.pos_embed.type_as(x).to(x.device).clone().detach()
+        B, num_tokens, C = x.shape
+        time_size, height, width = self.patch_embed.grid_size
+        mask = mask.to(device=x.device, dtype=torch.bool)
+        if tuple(mask.shape) != (B, num_tokens):
+            raise ValueError(
+                "mask must have shape {}, got {}".format(
+                    (B, num_tokens), tuple(mask.shape)
+                )
+            )
 
-        B, _, C = x.shape
+        rope_coords = None
+        if self.pos_mode == "original":
+            x = x + self.pos_embed.type_as(x).to(x.device).clone().detach()
+        elif self.pos_mode == "hwt_rope":
+            temporal_coordinate = torch.arange(
+                time_size, device=x.device, dtype=torch.float32
+            ).unsqueeze(0).expand(B, -1)
+            full_coords = build_3d_coordinates(
+                B,
+                (time_size, height, width),
+                temporal_coordinate,
+                x.device,
+            )
+            rope_coords = full_coords[~mask].reshape(B, -1, 3)
+        elif self.pos_mode == "hwf_rope":
+            x_grid = x.reshape(B, time_size, height, width, C)
+            mask_grid = mask.reshape(B, time_size, height, width)
+            temporal_coordinate = self.stpe(
+                x_grid.detach(), masked_pos=mask_grid
+            )
+            full_coords = build_3d_coordinates(
+                B,
+                (time_size, height, width),
+                temporal_coordinate,
+                x.device,
+            )
+            rope_coords = full_coords[~mask].reshape(B, -1, 3)
+
         x_vis = x[~mask].reshape(B, -1, C) # ~mask means visible
 
         if self.use_checkpoint:
             for blk in self.blocks:
-                x_vis = checkpoint.checkpoint(blk, x_vis)
+                if rope_coords is None:
+                    x_vis = checkpoint.checkpoint(blk, x_vis)
+                else:
+                    x_vis = checkpoint.checkpoint(blk, x_vis, rope_coords)
         else:   
             for blk in self.blocks:
-                x_vis = blk(x_vis)
+                x_vis = blk(x_vis, rope_coords)
 
         x_vis = self.norm(x_vis)
         return x_vis
@@ -201,6 +250,12 @@ class PretrainVisionTransformer(nn.Module):
                  use_learnable_pos_emb=False,
                  use_checkpoint=False,
                  tubelet_size=2,
+                 num_frames=16,
+                 pos_mode="original",
+                 rope_axis_dims=(20, 20, 24),
+                 rope_theta=10000.0,
+                 stpe_window_size=5,
+                 stpe_noise_mode="db4",
                  num_classes=0, # avoid the error from create_fn in timm
                  in_chans=0, # avoid the error from create_fn in timm
                  ):
@@ -222,6 +277,12 @@ class PretrainVisionTransformer(nn.Module):
             norm_layer=norm_layer, 
             init_values=init_values,
             tubelet_size=tubelet_size,
+            num_frames=num_frames,
+            pos_mode=pos_mode,
+            rope_axis_dims=rope_axis_dims,
+            rope_theta=rope_theta,
+            stpe_window_size=stpe_window_size,
+            stpe_noise_mode=stpe_noise_mode,
             use_checkpoint=use_checkpoint,
             use_learnable_pos_emb=use_learnable_pos_emb)
 
