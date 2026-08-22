@@ -241,11 +241,14 @@ def merge(eval_path, num_tasks):
         lines = open(file, 'r').readlines()[1:]
         for line in lines:
             line = line.strip()
-            name = line.split('[')[0]
-            label = line.split(']')[1].split(' ')[1]
-            chunk_nb = line.split(']')[1].split(' ')[2]
-            split_nb = line.split(']')[1].split(' ')[3]
-            data = np.fromstring(line.split('[')[1].split(']')[0], dtype=np.float, sep=',')
+            # Parse fields from the right because a video ID may contain brackets.
+            head, label, chunk_nb, split_nb = line.rsplit(maxsplit=3)
+            name, score_text = head.rsplit(' [', 1)
+            if not score_text.endswith(']'):
+                raise ValueError(f"Malformed prediction line: {line[:200]!r}")
+            data = np.fromstring(score_text[:-1], dtype=np.float64, sep=',')
+            if data.size == 0:
+                raise ValueError(f"Empty prediction array: {line[:200]!r}")
             data = softmax(data)
             if not name in dict_feats:
                 dict_feats[name] = []
@@ -263,7 +266,7 @@ def merge(eval_path, num_tasks):
     for i, item in enumerate(dict_feats):
         input_lst.append([i, item, dict_feats[item], dict_label[item]])
     from multiprocessing import Pool
-    p = Pool(64)
+    p = Pool(min(8, os.cpu_count() or 1))
     ans = p.map(compute_video, input_lst)
     top1 = [x[1] for x in ans]
     top5 = [x[2] for x in ans]
