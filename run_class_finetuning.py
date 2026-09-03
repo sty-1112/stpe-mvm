@@ -38,7 +38,7 @@ def get_args():
     parser.add_argument('--input_size', default=224, type=int,
                         help='videos input size')
     parser.add_argument('--pos_mode', default='original',
-                        choices=['original', 'hwt_rope', 'hwf_rope', 'hwft_rope'],
+                        choices=['original', 'hwt_rope', 'hwf_rope', 'hwft_rope', 'hwf_v2_rope'],
                         help='encoder positional encoding mode')
     parser.add_argument('--rope_axis_dims', default=[20, 20, 24], type=int, nargs='+',
                         metavar='AXIS_DIM',

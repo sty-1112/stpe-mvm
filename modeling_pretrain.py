@@ -15,6 +15,7 @@ from stpe_rope import (
     build_4d_coordinates,
     validate_pos_mode,
 )
+from temporal_pe_v2 import VideoSTPEV2
 
 
 def trunc_normal_(tensor, mean=0., std=1.):
@@ -80,13 +81,22 @@ class PretrainVisionTransformerEncoder(nn.Module):
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
 
-        # HWF and HWFT both require the observation-dependent f coordinate.
+        # HWF, HWF-V2 and HWFT require an observation-dependent f coordinate.
+        stpe_class = (
+            VideoSTPEV2
+            if self.pos_mode == "hwf_v2_rope"
+            else VideoSTPE
+        )
         self.stpe = (
-            VideoSTPE(
+            stpe_class(
                 window_size=stpe_window_size,
                 noise_mode=stpe_noise_mode,
             )
-            if self.pos_mode in ("hwf_rope", "hwft_rope")
+            if self.pos_mode in (
+                "hwf_rope",
+                "hwft_rope",
+                "hwf_v2_rope",
+            )
             else None
         )
 
@@ -250,7 +260,7 @@ class PretrainVisionTransformerEncoder(nn.Module):
                 3,
             )
 
-        elif self.pos_mode == "hwf_rope":
+        elif self.pos_mode in ("hwf_rope", "hwf_v2_rope"):
             x_grid = x.reshape(
                 batch_size,
                 time_size,
@@ -799,6 +809,7 @@ class PretrainVisionTransformer(nn.Module):
             "hwt_rope",
             "hwf_rope",
             "hwft_rope",
+            "hwf_v2_rope",
         ):
             if full_coords is None:
                 raise RuntimeError(

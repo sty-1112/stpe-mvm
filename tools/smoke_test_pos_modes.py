@@ -1,15 +1,22 @@
 """Run small original/HWT/HWF forward-backward compatibility checks."""
 
 from functools import partial
+from pathlib import Path
+import sys
 
 import torch
 import torch.nn as nn
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from modeling_finetune import VisionTransformer
 from modeling_pretrain import PretrainVisionTransformer
 
 
-MODES = ("original", "hwt_rope", "hwf_rope")
+MODES = ("original", "hwt_rope", "hwf_rope", "hwf_v2_rope")
 
 
 def make_tube_mask(batch_size, time_size, height, width):

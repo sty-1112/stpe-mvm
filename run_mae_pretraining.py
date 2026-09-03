@@ -30,7 +30,7 @@ def get_args():
                         help='depth of decoder')
 
     parser.add_argument('--pos_mode', default='original',
-                        choices=['original', 'hwt_rope', 'hwf_rope', 'hwft_rope'],
+                        choices=['original', 'hwt_rope', 'hwf_rope', 'hwft_rope', 'hwf_v2_rope'],
                         help='encoder positional encoding mode')
     parser.add_argument('--rope_axis_dims', default=[20, 20, 24], type=int, nargs='+',
                         metavar='AXIS_DIM',

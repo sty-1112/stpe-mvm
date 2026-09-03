@@ -14,6 +14,7 @@ from stpe_rope import (
     build_4d_coordinates,
     validate_finetune_pos_mode,
 )
+from temporal_pe_v2 import VideoSTPEV2
 
 
 def _cfg(url='', **kwargs):
@@ -237,10 +238,19 @@ class VisionTransformer(nn.Module):
         self.pos_mode = validate_finetune_pos_mode(pos_mode)
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
-        self.stpe = VideoSTPE(
+        stpe_class = (
+            VideoSTPEV2
+            if self.pos_mode == "hwf_v2_rope"
+            else VideoSTPE
+        )
+        self.stpe = stpe_class(
             window_size=stpe_window_size,
             noise_mode=stpe_noise_mode,
-        ) if self.pos_mode in ("hwf_rope", "hwft_rope") else None
+        ) if self.pos_mode in (
+            "hwf_rope",
+            "hwft_rope",
+            "hwf_v2_rope",
+        ) else None
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
@@ -314,7 +324,7 @@ class VisionTransformer(nn.Module):
                 temporal_coordinate,
                 x.device,
             )
-        elif self.pos_mode == "hwf_rope":
+        elif self.pos_mode in ("hwf_rope", "hwf_v2_rope"):
             x_grid = x.reshape(B, time_size, height, width, C)
             temporal_coordinate = self.stpe(x_grid.detach(), masked_pos=None)
             rope_coords = build_3d_coordinates(

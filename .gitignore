@@ -93,7 +93,9 @@ core
 core.*
 *.core
 
-/data_smoke/\n\n# BEGIN LOCAL EXPERIMENT ARTIFACTS
+/data_smoke/
+
+# BEGIN LOCAL EXPERIMENT ARTIFACTS
 # Local source-code backups
 *.bak
 *.bak_*

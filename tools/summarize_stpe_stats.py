@@ -192,7 +192,7 @@ def main():
             )
 
         if f.size > 1:
-            f_steps.extend(np.diff(f).tolist())
+            f_step_values.extend(np.diff(f).tolist())
 
             if np.any(np.diff(f) < -1.0e-7):
                 monotonic_violation_count += 1
