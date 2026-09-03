@@ -9,7 +9,12 @@ from modeling_finetune import Block, _cfg, PatchEmbed, get_sinusoid_encoding_tab
 from timm.models.registry import register_model
 from timm.models.layers import trunc_normal_ as __call_trunc_normal_
 
-from stpe_rope import VideoSTPE, build_3d_coordinates, validate_pos_mode
+from stpe_rope import (
+    VideoSTPE,
+    build_3d_coordinates,
+    build_4d_coordinates,
+    validate_pos_mode,
+)
 
 
 def trunc_normal_(tensor, mean=0., std=1.):
@@ -75,13 +80,13 @@ class PretrainVisionTransformerEncoder(nn.Module):
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
 
-        # Only HWF needs the observation-dependent temporal coordinate.
+        # HWF and HWFT both require the observation-dependent f coordinate.
         self.stpe = (
             VideoSTPE(
                 window_size=stpe_window_size,
                 noise_mode=stpe_noise_mode,
             )
-            if self.pos_mode == "hwf_rope"
+            if self.pos_mode in ("hwf_rope", "hwft_rope")
             else None
         )
 
@@ -288,6 +293,43 @@ class PretrainVisionTransformerEncoder(nn.Module):
                 3,
             )
 
+        elif self.pos_mode == "hwft_rope":
+            x_grid = x.reshape(
+                batch_size,
+                time_size,
+                height,
+                width,
+                channels,
+            )
+
+            mask_grid = mask.reshape(
+                batch_size,
+                time_size,
+                height,
+                width,
+            )
+
+            # f is computed only from tube-mask-visible tokens.
+            observation_coordinate = self.stpe(
+                x_grid.detach(),
+                masked_pos=mask_grid,
+            )
+
+            # Complete coordinates are ordered as (h, w, f, t).
+            full_coords = build_4d_coordinates(
+                batch_size,
+                (time_size, height, width),
+                observation_coordinate,
+                x.device,
+            )
+
+            # Encoder receives only visible HWFT coordinates.
+            rope_coords = full_coords[~mask].reshape(
+                batch_size,
+                -1,
+                4,
+            )
+
         # Encoder receives only visible patch tokens.
         x_vis = x[~mask].reshape(
             batch_size,
@@ -467,10 +509,11 @@ class PretrainVisionTransformerDecoder(nn.Module):
         """
 
         if rope_coords is not None:
+            expected_coord_axes = len(self.rope_axis_dims)
             expected_coords_shape = (
                 x.shape[0],
                 x.shape[1],
-                3,
+                expected_coord_axes,
             )
 
             if tuple(rope_coords.shape) != expected_coords_shape:
@@ -752,7 +795,11 @@ class PretrainVisionTransformer(nn.Module):
 
             decoder_coords = None
 
-        elif self.pos_mode in ("hwt_rope", "hwf_rope"):
+        elif self.pos_mode in (
+            "hwt_rope",
+            "hwf_rope",
+            "hwft_rope",
+        ):
             if full_coords is None:
                 raise RuntimeError(
                     "{} requires full RoPE coordinates".format(
@@ -765,16 +812,18 @@ class PretrainVisionTransformer(nn.Module):
             #
             # Therefore the coordinates must be rearranged in exactly
             # the same order.
+            coordinate_axes = int(full_coords.shape[-1])
+
             coords_vis = full_coords[~mask].reshape(
                 batch_size,
                 -1,
-                3,
+                coordinate_axes,
             )
 
             coords_mask = full_coords[mask].reshape(
                 batch_size,
                 -1,
-                3,
+                coordinate_axes,
             )
 
             decoder_coords = torch.cat(

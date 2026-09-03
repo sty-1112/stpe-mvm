@@ -38,11 +38,11 @@ def get_args():
     parser.add_argument('--input_size', default=224, type=int,
                         help='videos input size')
     parser.add_argument('--pos_mode', default='original',
-                        choices=['original', 'hwt_rope', 'hwf_rope'],
+                        choices=['original', 'hwt_rope', 'hwf_rope', 'hwft_rope'],
                         help='encoder positional encoding mode')
-    parser.add_argument('--rope_axis_dims', default=[20, 20, 24], type=int, nargs=3,
-                        metavar=('H_DIM', 'W_DIM', 'T_DIM'),
-                        help='RoPE dimensions assigned to h, w, and t/f')
+    parser.add_argument('--rope_axis_dims', default=[20, 20, 24], type=int, nargs='+',
+                        metavar='AXIS_DIM',
+                        help='RoPE dimensions for h,w,t/f or h,w,f,t')
     parser.add_argument('--rope_theta', default=10000.0, type=float,
                         help='RoPE frequency base')
     parser.add_argument('--stpe_window_size', default=5, type=int,

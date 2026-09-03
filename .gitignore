@@ -93,4 +93,19 @@ core
 core.*
 *.core
 
-/data_smoke/
+/data_smoke/\n\n# BEGIN LOCAL EXPERIMENT ARTIFACTS
+# Local source-code backups
+*.bak
+*.bak_*
+*.backup
+*.orig
+*.rej
+code_backup_*/
+
+# Patch-state marker files
+.*_backup_tag
+
+# Local Slurm submission records
+submitted_*.txt
+*_submit_*.txt
+# END LOCAL EXPERIMENT ARTIFACTS

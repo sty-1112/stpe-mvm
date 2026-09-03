@@ -6,13 +6,16 @@ non-persistent buffers, so enabling RoPE/STPE does not change checkpoint keys.
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 
 
-VALID_POS_MODES = ("original", "hwt_rope", "hwf_rope")
+VALID_POS_MODES = ('original', 'hwt_rope', 'hwf_rope', 'hwft_rope', 'hwf_v2_rope')
+VALID_FINETUNE_POS_MODES = VALID_POS_MODES
 
 
 def validate_pos_mode(pos_mode: str) -> str:
@@ -20,6 +23,16 @@ def validate_pos_mode(pos_mode: str) -> str:
         raise ValueError(
             "Unsupported pos_mode={!r}; expected one of {}".format(
                 pos_mode, VALID_POS_MODES
+            )
+        )
+    return pos_mode
+
+
+def validate_finetune_pos_mode(pos_mode: str) -> str:
+    if pos_mode not in VALID_FINETUNE_POS_MODES:
+        raise ValueError(
+            "Unsupported finetune pos_mode={!r}; expected one of {}".format(
+                pos_mode, VALID_FINETUNE_POS_MODES
             )
         )
     return pos_mode
@@ -73,6 +86,47 @@ def build_3d_coordinates(
     return coordinates.reshape(batch_size, t_size * h_size * w_size, 3)
 
 
+def build_4d_coordinates(
+    batch_size: int,
+    grid_size: Sequence[int],
+    observation_coordinate: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build HWFT coordinates ordered as (h, w, f, t).
+
+    The token flattening order remains T, H, W.  The f coordinate is produced
+    by VideoSTPE, while t is the original tubelet index 0..T-1.
+
+    Returns:
+        Float32 coordinates [B, T*H*W, 4] ordered as (h, w, f, t).
+    """
+    hwf_coordinates = build_3d_coordinates(
+        batch_size,
+        grid_size,
+        observation_coordinate,
+        device,
+    )
+
+    t_size, h_size, w_size = [int(value) for value in grid_size]
+    time_coordinate = torch.arange(
+        t_size,
+        device=device,
+        dtype=torch.float32,
+    )
+    time_coordinate = time_coordinate.view(
+        1, t_size, 1, 1
+    ).expand(
+        batch_size, t_size, h_size, w_size
+    )
+    time_coordinate = time_coordinate.reshape(
+        batch_size,
+        t_size * h_size * w_size,
+        1,
+    )
+
+    return torch.cat((hwf_coordinates, time_coordinate), dim=-1)
+
+
 def _apply_1d_rope(
     x: torch.Tensor,
     coordinate: torch.Tensor,
@@ -123,7 +177,7 @@ def apply_3d_rope(
     axis_dims: Sequence[int] = (20, 20, 24),
     theta: float = 10000.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Apply independent RoPE rotations for h, w, and t/f to Q and K.
+    """Apply independent RoPE rotations for every coordinate axis to Q and K.
 
     Any head dimensions after sum(axis_dims) are preserved.  This keeps the
     original model runnable for backbones whose head dimension is larger than
@@ -133,12 +187,20 @@ def apply_3d_rope(
         raise ValueError("q and k must have identical shapes")
     if q.ndim != 4:
         raise ValueError("q/k must have shape [B, heads, N, D]")
-    if coordinates.ndim != 3 or coordinates.shape[-1] != 3:
-        raise ValueError("coordinates must have shape [B, N, 3]")
+    if coordinates.ndim != 3 or coordinates.shape[-1] not in (3, 4):
+        raise ValueError(
+            "coordinates must have shape [B, N, 3] or [B, N, 4]"
+        )
 
+    num_axes = int(coordinates.shape[-1])
     axis_dims = tuple(int(dim) for dim in axis_dims)
-    if len(axis_dims) != 3:
-        raise ValueError("axis_dims must contain exactly three integers")
+    if len(axis_dims) != num_axes:
+        raise ValueError(
+            "axis_dims must contain exactly {} integers for coordinates "
+            "with {} axes, got {}".format(
+                num_axes, num_axes, len(axis_dims)
+            )
+        )
     if any(dim <= 0 or dim % 2 != 0 for dim in axis_dims):
         raise ValueError("axis_dims must be positive even integers")
     rotary_dim = sum(axis_dims)
@@ -300,6 +362,146 @@ class VideoSTPE(nn.Module):
             batch_size, time_size, num_visible, channels
         )
 
+    def _write_diagnostics(
+        self,
+        *,
+        observed_signal: torch.Tensor,
+        variation: torch.Tensor,
+        noise: torch.Tensor,
+        expected_v2: torch.Tensor,
+        gamma: torch.Tensor,
+        gamma_star: torch.Tensor,
+        scale: torch.Tensor,
+        median_dt: torch.Tensor,
+        alpha: torch.Tensor,
+        temporal_coordinate: torch.Tensor,
+    ) -> None:
+        """Optionally append raw STPE statistics to a rank-local JSONL file.
+
+        Diagnostics are disabled unless STPE_STATS_DIR is set. The first alpha
+        value is retained in the raw record, but downstream summaries exclude
+        alpha[:, 0] because it does not contribute to delta_f.
+        """
+        stats_dir = os.environ.get("STPE_STATS_DIR", "").strip()
+
+        if not stats_dir:
+            return
+
+        os.makedirs(stats_dir, exist_ok=True)
+
+        rank = os.environ.get(
+            "RANK",
+            os.environ.get("SLURM_PROCID", "0"),
+        )
+
+        if not hasattr(self, "_stpe_stats_step"):
+            self._stpe_stats_step = 0
+
+        self._stpe_stats_step += 1
+
+        output_file = os.path.join(
+            stats_dir,
+            "stpe_stats_rank{}.jsonl".format(rank),
+        )
+
+        denominator = (
+            scale * median_dt + self.eps
+        ).detach().float()
+
+        eps_fraction = (
+            self.eps / denominator
+        ).detach().float()
+
+        def finite_list(value):
+            value = value.detach().float()
+            value = torch.nan_to_num(
+                value,
+                nan=0.0,
+                posinf=1.0e30,
+                neginf=-1.0e30,
+            )
+            return value.cpu().tolist()
+
+        def finite_scalar(value):
+            value = value.detach().float()
+            value = torch.nan_to_num(
+                value,
+                nan=0.0,
+                posinf=1.0e30,
+                neginf=-1.0e30,
+            )
+            return float(value.item())
+
+        with open(
+            output_file,
+            mode="a",
+            encoding="utf-8",
+        ) as handle:
+            for sample_index in range(alpha.shape[0]):
+                raw_alpha = alpha[sample_index].detach().float()
+                raw_f = (
+                    temporal_coordinate[sample_index]
+                    .detach()
+                    .float()
+                )
+
+                record = {
+                    "rank": int(rank),
+                    "step": int(self._stpe_stats_step),
+                    "sample_in_batch": int(sample_index),
+                    "window_size": int(self.window_size),
+                    "noise_mode": self.noise_mode,
+                    "eps": float(self.eps),
+                    "time_size": int(alpha.shape[1]),
+                    "observed_signal": finite_list(
+                        observed_signal[sample_index]
+                    ),
+                    "variation": finite_list(
+                        variation[sample_index]
+                    ),
+                    "noise": finite_list(
+                        noise[sample_index]
+                    ),
+                    "expected_v2": finite_list(
+                        expected_v2[sample_index]
+                    ),
+                    "gamma": finite_list(
+                        gamma[sample_index]
+                    ),
+                    "gamma_star": finite_scalar(
+                        gamma_star[sample_index]
+                    ),
+                    "scale": finite_scalar(
+                        scale[sample_index]
+                    ),
+                    "median_dt": finite_scalar(
+                        median_dt[sample_index]
+                    ),
+                    "denominator": finite_scalar(
+                        denominator[sample_index]
+                    ),
+                    "eps_fraction": finite_scalar(
+                        eps_fraction[sample_index]
+                    ),
+                    "alpha": finite_list(raw_alpha),
+                    "f": finite_list(raw_f),
+                    "alpha_nonfinite_count": int(
+                        (~torch.isfinite(raw_alpha)).sum().item()
+                    ),
+                    "f_nonfinite_count": int(
+                        (~torch.isfinite(raw_f)).sum().item()
+                    ),
+                }
+
+                handle.write(
+                    json.dumps(
+                        record,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    + "\n"
+                )
+
     @torch.no_grad()
     def forward(
         self,
@@ -351,6 +553,24 @@ class VideoSTPE(nn.Module):
         delta_f = torch.zeros_like(alpha)
         delta_f[:, 1:] = dt_steps * alpha[:, 1:]
         temporal_coordinate = torch.cumsum(delta_f, dim=1)
-        return torch.nan_to_num(
-            temporal_coordinate, nan=0.0, posinf=0.0, neginf=0.0
+        temporal_coordinate = torch.nan_to_num(
+            temporal_coordinate,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
         )
+
+        self._write_diagnostics(
+            observed_signal=observed_signal,
+            variation=variation,
+            noise=noise,
+            expected_v2=expected_v2,
+            gamma=gamma,
+            gamma_star=gamma_star,
+            scale=scale,
+            median_dt=median_dt,
+            alpha=alpha,
+            temporal_coordinate=temporal_coordinate,
+        )
+
+        return temporal_coordinate

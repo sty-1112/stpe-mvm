@@ -11,7 +11,8 @@ from stpe_rope import (
     VideoSTPE,
     apply_3d_rope,
     build_3d_coordinates,
-    validate_pos_mode,
+    build_4d_coordinates,
+    validate_finetune_pos_mode,
 )
 
 
@@ -233,13 +234,13 @@ class VisionTransformer(nn.Module):
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, num_frames=all_frames, tubelet_size=self.tubelet_size)
         num_patches = self.patch_embed.num_patches
         self.use_checkpoint = use_checkpoint
-        self.pos_mode = validate_pos_mode(pos_mode)
+        self.pos_mode = validate_finetune_pos_mode(pos_mode)
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
         self.stpe = VideoSTPE(
             window_size=stpe_window_size,
             noise_mode=stpe_noise_mode,
-        ) if self.pos_mode == "hwf_rope" else None
+        ) if self.pos_mode in ("hwf_rope", "hwft_rope") else None
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
@@ -320,6 +321,18 @@ class VisionTransformer(nn.Module):
                 B,
                 (time_size, height, width),
                 temporal_coordinate,
+                x.device,
+            )
+        elif self.pos_mode == "hwft_rope":
+            x_grid = x.reshape(B, time_size, height, width, C)
+            observation_coordinate = self.stpe(
+                x_grid.detach(),
+                masked_pos=None,
+            )
+            rope_coords = build_4d_coordinates(
+                B,
+                (time_size, height, width),
+                observation_coordinate,
                 x.device,
             )
         x = self.pos_drop(x)
