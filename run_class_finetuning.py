@@ -49,6 +49,8 @@ def get_args():
                         help='local window used by the STPE statistic')
     parser.add_argument('--stpe_noise_mode', default='db4', choices=['db4', 'none'],
                         help='STPE observation-noise estimator')
+    parser.add_argument('--stpe_mix_beta', default=1.0, type=float,
+                        help='raw-time/adaptive-coordinate mixing coefficient')
 
     parser.add_argument('--fc_drop_rate', type=float, default=0.0, metavar='PCT',
                         help='Dropout rate (default: 0.)')
@@ -331,6 +333,7 @@ def main(args, ds_init):
         rope_theta=args.rope_theta,
         stpe_window_size=args.stpe_window_size,
         stpe_noise_mode=args.stpe_noise_mode,
+        stpe_mix_beta=args.stpe_mix_beta,
     )
 
     patch_size = model.patch_embed.patch_size

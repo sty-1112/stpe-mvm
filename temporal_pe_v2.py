@@ -15,6 +15,25 @@ from stpe_rope import VideoSTPE
 class VideoSTPEV2(VideoSTPE):
     """Compute f using positive-gamma total-span-preserving calibration."""
 
+    def __init__(
+        self,
+        window_size=5,
+        noise_mode="db4",
+        eps=1e-6,
+        mix_beta=1.0,
+    ):
+        super().__init__(
+            window_size=window_size,
+            noise_mode=noise_mode,
+            eps=eps,
+        )
+        mix_beta = float(mix_beta)
+        if not 0.0 <= mix_beta <= 1.0:
+            raise ValueError(
+                "mix_beta must be in [0, 1], got {}".format(mix_beta)
+            )
+        self.mix_beta = mix_beta
+
     @torch.no_grad()
     def forward(self, patch_tokens, masked_pos=None):
         if patch_tokens.ndim != 5:
@@ -121,10 +140,20 @@ class VideoSTPEV2(VideoSTPE):
         #
         # delta_f_k =
         #     gamma_k^+ * total_duration / sum_j gamma_j^+
-        candidate_delta_f = (
+        adaptive_delta_f = (
             positive_step_gamma
             * total_duration.unsqueeze(1)
             / safe_mass.unsqueeze(1)
+        )
+
+        # Retain a raw-time residual while preserving the total span:
+        #
+        # delta_f = (1 - beta) * delta_t + beta * adaptive_delta_f
+        #
+        # beta = 0 gives raw time; beta = 1 recovers the original V2.
+        candidate_delta_f = (
+            (1.0 - self.mix_beta) * dt_steps
+            + self.mix_beta * adaptive_delta_f
         )
 
         # If the corrected observation variation is unreliable,

@@ -59,6 +59,7 @@ class PretrainVisionTransformerEncoder(nn.Module):
         rope_theta=10000.0,
         stpe_window_size=5,
         stpe_noise_mode="db4",
+        stpe_mix_beta=1.0,
     ):
         super().__init__()
 
@@ -82,23 +83,19 @@ class PretrainVisionTransformerEncoder(nn.Module):
         self.rope_theta = float(rope_theta)
 
         # HWF, HWF-V2 and HWFT require an observation-dependent f coordinate.
-        stpe_class = (
-            VideoSTPEV2
-            if self.pos_mode == "hwf_v2_rope"
-            else VideoSTPE
-        )
-        self.stpe = (
-            stpe_class(
+        if self.pos_mode == "hwf_v2_rope":
+            self.stpe = VideoSTPEV2(
+                window_size=stpe_window_size,
+                noise_mode=stpe_noise_mode,
+                mix_beta=stpe_mix_beta,
+            )
+        elif self.pos_mode in ("hwf_rope", "hwft_rope"):
+            self.stpe = VideoSTPE(
                 window_size=stpe_window_size,
                 noise_mode=stpe_noise_mode,
             )
-            if self.pos_mode in (
-                "hwf_rope",
-                "hwft_rope",
-                "hwf_v2_rope",
-            )
-            else None
-        )
+        else:
+            self.stpe = None
 
         # Retain the original VideoMAE positional embedding for original mode.
         if use_learnable_pos_emb:
@@ -602,6 +599,7 @@ class PretrainVisionTransformer(nn.Module):
         rope_theta=10000.0,
         stpe_window_size=5,
         stpe_noise_mode="db4",
+        stpe_mix_beta=1.0,
         num_classes=0,
         in_chans=0,
     ):
@@ -632,6 +630,7 @@ class PretrainVisionTransformer(nn.Module):
             rope_theta=rope_theta,
             stpe_window_size=stpe_window_size,
             stpe_noise_mode=stpe_noise_mode,
+            stpe_mix_beta=stpe_mix_beta,
             use_checkpoint=use_checkpoint,
             use_learnable_pos_emb=use_learnable_pos_emb,
         )

@@ -41,6 +41,8 @@ def get_args():
                         help='local window used by the STPE statistic')
     parser.add_argument('--stpe_noise_mode', default='db4', choices=['db4', 'none'],
                         help='STPE observation-noise estimator')
+    parser.add_argument('--stpe_mix_beta', default=1.0, type=float,
+                        help='raw-time/adaptive-coordinate mixing coefficient')
 
     parser.add_argument('--mask_type', default='tube', choices=['random', 'tube'],
                         type=str, help='masked strategy of video tokens/patches')
@@ -146,6 +148,7 @@ def get_model(args):
         rope_theta=args.rope_theta,
         stpe_window_size=args.stpe_window_size,
         stpe_noise_mode=args.stpe_noise_mode,
+        stpe_mix_beta=args.stpe_mix_beta,
     )
     return model
 

@@ -226,7 +226,8 @@ class VisionTransformer(nn.Module):
                  rope_axis_dims=(20, 20, 24),
                  rope_theta=10000.0,
                  stpe_window_size=5,
-                 stpe_noise_mode="db4"):
+                 stpe_noise_mode="db4",
+                 stpe_mix_beta=1.0):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -238,19 +239,19 @@ class VisionTransformer(nn.Module):
         self.pos_mode = validate_finetune_pos_mode(pos_mode)
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
-        stpe_class = (
-            VideoSTPEV2
-            if self.pos_mode == "hwf_v2_rope"
-            else VideoSTPE
-        )
-        self.stpe = stpe_class(
-            window_size=stpe_window_size,
-            noise_mode=stpe_noise_mode,
-        ) if self.pos_mode in (
-            "hwf_rope",
-            "hwft_rope",
-            "hwf_v2_rope",
-        ) else None
+        if self.pos_mode == "hwf_v2_rope":
+            self.stpe = VideoSTPEV2(
+                window_size=stpe_window_size,
+                noise_mode=stpe_noise_mode,
+                mix_beta=stpe_mix_beta,
+            )
+        elif self.pos_mode in ("hwf_rope", "hwft_rope"):
+            self.stpe = VideoSTPE(
+                window_size=stpe_window_size,
+                noise_mode=stpe_noise_mode,
+            )
+        else:
+            self.stpe = None
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))

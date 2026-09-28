@@ -111,3 +111,5 @@ code_backup_*/
 submitted_*.txt
 *_submit_*.txt
 # END LOCAL EXPERIMENT ARTIFACTS
+
+/jobs/
