@@ -11,7 +11,7 @@ import math
 import torch
 
 
-BASELINE_POS_MODES = ("vanilla_rope",)
+BASELINE_POS_MODES = ("vanilla_rope", "tad_rope")
 
 
 def baseline_coordinate_axes(mode: str) -> int:
@@ -25,6 +25,7 @@ def build_baseline_coordinates(
     batch_size: int,
     grid_size: Sequence[int],
     device: torch.device,
+    tad_gamma: float = 1.0,
 ) -> torch.Tensor:
     """Return [B,T*H*W,A] positions, without renumbering visible tokens."""
     baseline_coordinate_axes(mode)
@@ -34,6 +35,14 @@ def build_baseline_coordinates(
     positions = torch.arange(
         time_size * height * width, device=device, dtype=torch.float32
     ).view(1, -1, 1)
+    if mode == "tad_rope":
+        if not math.isfinite(float(tad_gamma)) or float(tad_gamma) < 0:
+            raise ValueError("tad_gamma must be finite and nonnegative")
+        time = torch.arange(time_size, device=device, dtype=torch.float32)
+        time = time.repeat_interleave(height * width).view(1, -1, 1)
+        # TC-LLaVA's dual rotation composes on the same channels:
+        # R(n) R(gamma*t) = R(n + gamma*t), not a channel split.
+        positions = positions + float(tad_gamma) * time
     return positions.expand(batch_size, -1, -1)
 
 

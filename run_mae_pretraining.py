@@ -40,6 +40,8 @@ def get_args():
                         help='RoPE frequency base')
     parser.add_argument('--rope_rotary_dim', default=64, type=int,
                         help='total rotated channels per head for PE baselines')
+    parser.add_argument('--tad_gamma', default=1.0, type=float,
+                        help='TAD-RoPE temporal offset multiplier')
     parser.add_argument('--stpe_window_size', default=5, type=int,
                         help='local window used by the STPE statistic')
     parser.add_argument('--stpe_noise_mode', default='db4', choices=['db4', 'none'],
@@ -150,6 +152,7 @@ def get_model(args):
         rope_axis_dims=tuple(args.rope_axis_dims),
         rope_theta=args.rope_theta,
         rope_rotary_dim=args.rope_rotary_dim,
+        tad_gamma=args.tad_gamma,
         stpe_window_size=args.stpe_window_size,
         stpe_noise_mode=args.stpe_noise_mode,
         stpe_mix_beta=args.stpe_mix_beta,

@@ -9,12 +9,20 @@ reproductions of video-language-model benchmark scores. Existing `original`,
 | CLI mode | Positions | Frequency allocation |
 | --- | --- | --- |
 | `vanilla_rope` | Full-grid flattened index `n = t*H*W + h*W + w` | All global RoPE frequencies use `n` |
+| `tad_rope` | `n + gamma*t` | Global and temporal rotations compose on the same channels |
 
 New baselines default to `--rope_rotary_dim 64 --rope_theta 10000`.
 Any channels beyond `rope_rotary_dim` remain unchanged. The existing
 `--rope_axis_dims` option keeps the `(h,w,t/f)` convention; it is irrelevant
 for one-dimensional Vanilla RoPE. Legacy modes still use independent
 per-axis frequencies and ignore `rope_rotary_dim`.
+
+TAD-RoPE follows TC-LLaVA (AAAI 2025): the two rotations are equivalent to
+adding position angles, not assigning them to disjoint channel groups.
+`--tad_gamma` defaults to 1, matching VideoRoPE's official comparison code;
+gamma=0 recovers Vanilla RoPE exactly. This adaptation retains VideoMAE's
+bidirectional attention and does not add TC-LLaVA's causal attention mask.
+Reference: https://arxiv.org/abs/2409.03206
 
 Positions are created on the complete tubelet grid before selecting visible
 tokens. The decoder receives coordinates reordered to `[visible, masked]`;

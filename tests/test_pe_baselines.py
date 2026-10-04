@@ -60,6 +60,27 @@ def test_vanilla_matches_independent_reference():
     torch.testing.assert_close(actual, expected)
 
 
+def test_tad_dual_rotation_and_gamma_zero():
+    q = torch.randn(2, 3, 8, 64)
+    vanilla = build_baseline_coordinates("vanilla_rope", 2, (2, 2, 2), q.device)
+    tad = build_baseline_coordinates("tad_rope", 2, (2, 2, 2), q.device, tad_gamma=3.)
+    torch.testing.assert_close(tad[0, :, 0], torch.tensor([0., 1., 2., 3., 7., 8., 9., 10.]))
+    qr, _ = apply_video_rope(q, q, vanilla, "vanilla_rope")
+    time = tad - vanilla
+    composed, _ = apply_video_rope(qr, qr, time, "vanilla_rope")
+    actual, _ = apply_video_rope(q, q, tad, "tad_rope")
+    torch.testing.assert_close(actual, composed)
+    zero = build_baseline_coordinates("tad_rope", 2, (2, 2, 2), q.device, tad_gamma=0.)
+    torch.testing.assert_close(zero, vanilla)
+
+
+def test_tad_gamma_reaches_model_coordinate_builder():
+    model = pretrain_model("tad_rope", tad_gamma=4.)
+    _, coords = model.encoder.forward_features(torch.randn(2, 3, 4, 32, 32), tube_mask())
+    expected = build_baseline_coordinates("tad_rope", 2, (2, 2, 2), torch.device("cpu"), tad_gamma=4.)
+    torch.testing.assert_close(coords, expected)
+
+
 @pytest.mark.parametrize("mode", BASELINE_POS_MODES)
 def test_rotation_norm_tail_and_gradients(mode):
     q = torch.randn(2, 3, 8, 80, requires_grad=True)
@@ -137,7 +158,8 @@ def test_training_cli_accepts_baseline(entrypoint, mode, monkeypatch):
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_args")
     namespace = {"argparse": argparse, "BASELINE_POS_MODES": BASELINE_POS_MODES}
     exec(compile(ast.Module(body=[function], type_ignores=[]), entrypoint, "exec"), namespace)
-    monkeypatch.setattr("sys.argv", [entrypoint, "--pos_mode", mode, "--rope_rotary_dim", "64"])
+    monkeypatch.setattr("sys.argv", [entrypoint, "--pos_mode", mode, "--rope_rotary_dim", "64", "--tad_gamma", "3"])
     parsed = namespace["get_args"]()
     args = parsed[0] if isinstance(parsed, tuple) else parsed
     assert args.pos_mode == mode and args.rope_rotary_dim == 64
+    assert args.tad_gamma == 3.
