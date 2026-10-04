@@ -1,4 +1,5 @@
 import argparse
+from video_rope import BASELINE_POS_MODES
 import datetime
 import numpy as np
 import time
@@ -38,13 +39,15 @@ def get_args():
     parser.add_argument('--input_size', default=224, type=int,
                         help='videos input size')
     parser.add_argument('--pos_mode', default='original',
-                        choices=['original', 'hwt_rope', 'hwf_rope', 'hwft_rope', 'hwf_v2_rope'],
+                        choices=['original', 'hwt_rope', 'hwf_rope', 'hwft_rope', 'hwf_v2_rope'] + list(BASELINE_POS_MODES),
                         help='encoder positional encoding mode')
     parser.add_argument('--rope_axis_dims', default=[20, 20, 24], type=int, nargs='+',
                         metavar='AXIS_DIM',
                         help='RoPE dimensions for h,w,t/f or h,w,f,t')
     parser.add_argument('--rope_theta', default=10000.0, type=float,
                         help='RoPE frequency base')
+    parser.add_argument('--rope_rotary_dim', default=64, type=int,
+                        help='total rotated channels per head for PE baselines')
     parser.add_argument('--stpe_window_size', default=5, type=int,
                         help='local window used by the STPE statistic')
     parser.add_argument('--stpe_noise_mode', default='db4', choices=['db4', 'none'],
@@ -331,6 +334,7 @@ def main(args, ds_init):
         pos_mode=args.pos_mode,
         rope_axis_dims=tuple(args.rope_axis_dims),
         rope_theta=args.rope_theta,
+        rope_rotary_dim=args.rope_rotary_dim,
         stpe_window_size=args.stpe_window_size,
         stpe_noise_mode=args.stpe_noise_mode,
         stpe_mix_beta=args.stpe_mix_beta,

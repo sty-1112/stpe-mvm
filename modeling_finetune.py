@@ -15,6 +15,7 @@ from stpe_rope import (
     validate_finetune_pos_mode,
 )
 from temporal_pe_v2 import VideoSTPEV2
+from video_rope import BASELINE_POS_MODES, apply_video_rope, build_baseline_coordinates
 
 
 def _cfg(url='', **kwargs):
@@ -65,7 +66,7 @@ class Attention(nn.Module):
     def __init__(
             self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0.,
             proj_drop=0., attn_head_dim=None, rope_axis_dims=(20, 20, 24),
-            rope_theta=10000.0):
+            rope_theta=10000.0, rope_mode="hwt_rope", rope_rotary_dim=64):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -75,6 +76,8 @@ class Attention(nn.Module):
         self.scale = qk_scale or head_dim ** -0.5
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
+        self.rope_mode = rope_mode
+        self.rope_rotary_dim = int(rope_rotary_dim)
 
         self.qkv = nn.Linear(dim, all_head_dim * 3, bias=False)
         if qkv_bias:
@@ -99,13 +102,20 @@ class Attention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
         if rope_coords is not None:
-            q, k = apply_3d_rope(
-                q,
-                k,
-                rope_coords,
-                axis_dims=self.rope_axis_dims,
-                theta=self.rope_theta,
-            )
+            if self.rope_mode in BASELINE_POS_MODES:
+                q, k = apply_video_rope(
+                    q, k, rope_coords, self.rope_mode,
+                    rotary_dim=self.rope_rotary_dim,
+                    axis_dims=self.rope_axis_dims, theta=self.rope_theta,
+                )
+            else:
+                q, k = apply_3d_rope(
+                    q,
+                    k,
+                    rope_coords,
+                    axis_dims=self.rope_axis_dims,
+                    theta=self.rope_theta,
+                )
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
 
@@ -123,13 +133,15 @@ class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., init_values=None, act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-                 attn_head_dim=None, rope_axis_dims=(20, 20, 24), rope_theta=10000.0):
+                 attn_head_dim=None, rope_axis_dims=(20, 20, 24), rope_theta=10000.0,
+                 rope_mode="hwt_rope", rope_rotary_dim=64):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
             attn_drop=attn_drop, proj_drop=drop, attn_head_dim=attn_head_dim,
-            rope_axis_dims=rope_axis_dims, rope_theta=rope_theta)
+            rope_axis_dims=rope_axis_dims, rope_theta=rope_theta,
+            rope_mode=rope_mode, rope_rotary_dim=rope_rotary_dim)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -227,7 +239,8 @@ class VisionTransformer(nn.Module):
                  rope_theta=10000.0,
                  stpe_window_size=5,
                  stpe_noise_mode="db4",
-                 stpe_mix_beta=1.0):
+                 stpe_mix_beta=1.0,
+                 rope_rotary_dim=64):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -268,7 +281,8 @@ class VisionTransformer(nn.Module):
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                 init_values=init_values, rope_axis_dims=self.rope_axis_dims,
-                rope_theta=self.rope_theta)
+                rope_theta=self.rope_theta, rope_mode=self.pos_mode,
+                rope_rotary_dim=rope_rotary_dim)
             for i in range(depth)])
         self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
@@ -315,6 +329,10 @@ class VisionTransformer(nn.Module):
 
         if self.pos_mode == "original" and self.pos_embed is not None:
             x = x + self.pos_embed.expand(B, -1, -1).type_as(x).to(x.device).clone().detach()
+        elif self.pos_mode in BASELINE_POS_MODES:
+            rope_coords = build_baseline_coordinates(
+                self.pos_mode, B, (time_size, height, width), x.device
+            )
         elif self.pos_mode == "hwt_rope":
             temporal_coordinate = torch.arange(
                 time_size, device=x.device, dtype=torch.float32

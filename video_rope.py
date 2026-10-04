@@ -1,0 +1,78 @@
+"""Parameter-free RoPE baselines for VideoMAE.
+
+Positions are built before masking in Conv3d's T,H,W flattening order.
+All baselines use one global frequency ladder and adjacent channel pairs,
+matching the pairing convention of the existing HWT/HWF implementation.
+"""
+
+from typing import Sequence, Tuple
+import math
+
+import torch
+
+
+BASELINE_POS_MODES = ("vanilla_rope",)
+
+
+def baseline_coordinate_axes(mode: str) -> int:
+    if mode not in BASELINE_POS_MODES:
+        raise ValueError("Unsupported baseline positional mode: {!r}".format(mode))
+    return 1
+
+
+def build_baseline_coordinates(
+    mode: str,
+    batch_size: int,
+    grid_size: Sequence[int],
+    device: torch.device,
+) -> torch.Tensor:
+    """Return [B,T*H*W,A] positions, without renumbering visible tokens."""
+    baseline_coordinate_axes(mode)
+    if len(grid_size) != 3 or any(int(size) <= 0 for size in grid_size):
+        raise ValueError("grid_size must contain three positive sizes (T,H,W)")
+    time_size, height, width = (int(size) for size in grid_size)
+    positions = torch.arange(
+        time_size * height * width, device=device, dtype=torch.float32
+    ).view(1, -1, 1)
+    return positions.expand(batch_size, -1, -1)
+
+
+def apply_video_rope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    coordinates: torch.Tensor,
+    mode: str,
+    rotary_dim: int = 64,
+    axis_dims: Sequence[int] = (24, 24, 16),
+    theta: float = 10000.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Rotate Q/K using a global frequency ladder; preserve any tail."""
+    axes = baseline_coordinate_axes(mode)
+    rotary_dim = int(rotary_dim)
+    if q.ndim != 4 or q.shape != k.shape:
+        raise ValueError("q/k must have matching [B,heads,N,D] shapes")
+    if rotary_dim <= 0 or rotary_dim % 2 or rotary_dim > q.shape[-1]:
+        raise ValueError("rotary_dim must be positive, even, and <= head dimension")
+    if not math.isfinite(float(theta)) or float(theta) <= 0:
+        raise ValueError("rope_theta must be finite and positive")
+    if tuple(coordinates.shape) != (q.shape[0], q.shape[2], axes):
+        raise ValueError("Baseline coordinates do not match Q/K token shape")
+
+    frequencies = float(theta) ** (
+        -torch.arange(0, rotary_dim, 2, device=q.device, dtype=torch.float32)
+        / float(rotary_dim)
+    )
+    positions = coordinates.to(device=q.device, dtype=torch.float32)
+    angles = positions[..., 0:1] * frequencies
+    cos = angles.cos().unsqueeze(1)
+    sin = angles.sin().unsqueeze(1)
+
+    def rotate(x):
+        work = x[..., :rotary_dim].float()
+        even, odd = work[..., 0::2], work[..., 1::2]
+        rotated = torch.stack(
+            (even * cos - odd * sin, even * sin + odd * cos), dim=-1
+        ).flatten(-2).to(x.dtype)
+        return torch.cat((rotated, x[..., rotary_dim:]), dim=-1)
+
+    return rotate(q), rotate(k)

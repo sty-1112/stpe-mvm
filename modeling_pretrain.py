@@ -16,6 +16,7 @@ from stpe_rope import (
     validate_pos_mode,
 )
 from temporal_pe_v2 import VideoSTPEV2
+from video_rope import BASELINE_POS_MODES, baseline_coordinate_axes, build_baseline_coordinates
 
 
 def trunc_normal_(tensor, mean=0., std=1.):
@@ -60,6 +61,7 @@ class PretrainVisionTransformerEncoder(nn.Module):
         stpe_window_size=5,
         stpe_noise_mode="db4",
         stpe_mix_beta=1.0,
+        rope_rotary_dim=64,
     ):
         super().__init__()
 
@@ -127,6 +129,8 @@ class PretrainVisionTransformerEncoder(nn.Module):
                 init_values=init_values,
                 rope_axis_dims=self.rope_axis_dims,
                 rope_theta=self.rope_theta,
+                rope_mode=self.pos_mode,
+                rope_rotary_dim=rope_rotary_dim,
             )
             for index in range(depth)
         ])
@@ -226,6 +230,14 @@ class PretrainVisionTransformerEncoder(nn.Module):
                 .to(x.device)
                 .clone()
                 .detach()
+            )
+
+        elif self.pos_mode in BASELINE_POS_MODES:
+            full_coords = build_baseline_coordinates(
+                self.pos_mode, batch_size, (time_size, height, width), x.device
+            )
+            rope_coords = full_coords[~mask].reshape(
+                batch_size, -1, full_coords.shape[-1]
             )
 
         elif self.pos_mode == "hwt_rope":
@@ -410,6 +422,8 @@ class PretrainVisionTransformerDecoder(nn.Module):
         use_checkpoint=False,
         rope_axis_dims=(20, 20, 24),
         rope_theta=10000.0,
+        rope_mode="hwt_rope",
+        rope_rotary_dim=64,
     ):
         super().__init__()
 
@@ -426,6 +440,7 @@ class PretrainVisionTransformerDecoder(nn.Module):
 
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
+        self.rope_mode = rope_mode
 
         dpr = [
             value.item()
@@ -446,6 +461,8 @@ class PretrainVisionTransformerDecoder(nn.Module):
                 init_values=init_values,
                 rope_axis_dims=self.rope_axis_dims,
                 rope_theta=self.rope_theta,
+                rope_mode=self.rope_mode,
+                rope_rotary_dim=rope_rotary_dim,
             )
             for index in range(depth)
         ])
@@ -516,7 +533,11 @@ class PretrainVisionTransformerDecoder(nn.Module):
         """
 
         if rope_coords is not None:
-            expected_coord_axes = len(self.rope_axis_dims)
+            expected_coord_axes = (
+                baseline_coordinate_axes(self.rope_mode)
+                if self.rope_mode in BASELINE_POS_MODES
+                else len(self.rope_axis_dims)
+            )
             expected_coords_shape = (
                 x.shape[0],
                 x.shape[1],
@@ -600,6 +621,7 @@ class PretrainVisionTransformer(nn.Module):
         stpe_window_size=5,
         stpe_noise_mode="db4",
         stpe_mix_beta=1.0,
+        rope_rotary_dim=64,
         num_classes=0,
         in_chans=0,
     ):
@@ -631,6 +653,7 @@ class PretrainVisionTransformer(nn.Module):
             stpe_window_size=stpe_window_size,
             stpe_noise_mode=stpe_noise_mode,
             stpe_mix_beta=stpe_mix_beta,
+            rope_rotary_dim=rope_rotary_dim,
             use_checkpoint=use_checkpoint,
             use_learnable_pos_emb=use_learnable_pos_emb,
         )
@@ -654,6 +677,8 @@ class PretrainVisionTransformer(nn.Module):
             use_checkpoint=use_checkpoint,
             rope_axis_dims=rope_axis_dims,
             rope_theta=rope_theta,
+            rope_mode=self.pos_mode,
+            rope_rotary_dim=rope_rotary_dim,
         )
 
         self.encoder_to_decoder = nn.Linear(
@@ -804,7 +829,7 @@ class PretrainVisionTransformer(nn.Module):
 
             decoder_coords = None
 
-        elif self.pos_mode in (
+        elif self.pos_mode in BASELINE_POS_MODES or self.pos_mode in (
             "hwt_rope",
             "hwf_rope",
             "hwft_rope",

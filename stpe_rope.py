@@ -12,9 +12,10 @@ from typing import Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
+from video_rope import BASELINE_POS_MODES
 
 
-VALID_POS_MODES = ('original', 'hwt_rope', 'hwf_rope', 'hwft_rope', 'hwf_v2_rope')
+VALID_POS_MODES = ('original', 'hwt_rope', 'hwf_rope', 'hwft_rope', 'hwf_v2_rope') + BASELINE_POS_MODES
 VALID_FINETUNE_POS_MODES = VALID_POS_MODES
 
 
