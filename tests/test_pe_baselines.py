@@ -81,6 +81,39 @@ def test_tad_gamma_reaches_model_coordinate_builder():
     torch.testing.assert_close(coords, expected)
 
 
+def test_mrope_global_frequency_assignment():
+    q = torch.randn(2, 3, 8, 64)
+    coords = build_baseline_coordinates("m_rope", 2, (2, 2, 2), q.device)
+    torch.testing.assert_close(coords[0, 4], torch.tensor([0., 0., 1.]))
+    torch.testing.assert_close(coords[0, 3], torch.tensor([1., 1., 0.]))
+    actual, _ = apply_video_rope(q, q, coords, "m_rope")
+    expected = q.clone()
+    axes = [2] * 8 + [0] * 12 + [1] * 12
+    for pair, axis in enumerate(axes):
+        angle = coords[..., axis].unsqueeze(1) / (10000.0 ** (2 * pair / 64))
+        a, b = q[..., 2 * pair], q[..., 2 * pair + 1]
+        expected[..., 2 * pair] = a * angle.cos() - b * angle.sin()
+        expected[..., 2 * pair + 1] = a * angle.sin() + b * angle.cos()
+    torch.testing.assert_close(actual, expected)
+
+
+def test_mrope_equal_axis_positions_reduce_to_vanilla():
+    q = torch.randn(2, 3, 8, 64)
+    one = build_baseline_coordinates("vanilla_rope", 2, (2, 2, 2), q.device)
+    three = one.expand(-1, -1, 3)
+    vanilla, _ = apply_video_rope(q, q, one, "vanilla_rope")
+    mrope, _ = apply_video_rope(q, q, three, "m_rope")
+    torch.testing.assert_close(mrope, vanilla)
+
+
+@pytest.mark.parametrize("dims", [(12, 12, 8), (23, 25, 16), (32, 32)])
+def test_mrope_rejects_invalid_dimension_budget(dims):
+    q = torch.randn(1, 1, 8, 64)
+    coords = build_baseline_coordinates("m_rope", 1, (2, 2, 2), q.device)
+    with pytest.raises(ValueError):
+        apply_video_rope(q, q, coords, "m_rope", axis_dims=dims)
+
+
 @pytest.mark.parametrize("mode", BASELINE_POS_MODES)
 def test_rotation_norm_tail_and_gradients(mode):
     q = torch.randn(2, 3, 8, 80, requires_grad=True)

@@ -12,7 +12,7 @@ set -euo pipefail
 
 : "${REPO_DIR:?}" "${PYTHON_BIN:?}" "${RUN_ROOT:?}" "${SPLIT:?}" "${POS_MODE:?}"
 case "$POS_MODE" in
-  vanilla_rope|tad_rope) ;;
+  vanilla_rope|tad_rope|m_rope) ;;
   *) echo "Unsupported PE baseline: $POS_MODE" >&2; exit 1 ;;
 esac
 read -r -a axis_dims <<< "${ROPE_AXIS_DIMS:-24 24 16}"

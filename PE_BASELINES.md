@@ -10,6 +10,7 @@ reproductions of video-language-model benchmark scores. Existing `original`,
 | --- | --- | --- |
 | `vanilla_rope` | Full-grid flattened index `n = t*H*W + h*W + w` | All global RoPE frequencies use `n` |
 | `tad_rope` | `n + gamma*t` | Global and temporal rotations compose on the same channels |
+| `m_rope` | Grid coordinates `(h,w,t)` | Global frequencies assigned to `t`, then `h`, then `w` |
 
 New baselines default to `--rope_rotary_dim 64 --rope_theta 10000`.
 Any channels beyond `rope_rotary_dim` remain unchanged. The existing
@@ -23,6 +24,18 @@ adding position angles, not assigning them to disjoint channel groups.
 gamma=0 recovers Vanilla RoPE exactly. This adaptation retains VideoMAE's
 bidirectional attention and does not add TC-LLaVA's causal attention mask.
 Reference: https://arxiv.org/abs/2409.03206
+
+M-RoPE follows Qwen2-VL (2024 technical report). Use
+`--rope_axis_dims 24 24 16 --rope_rotary_dim 64` to scale the reference
+128-channel allocation (48 spatial channels per axis, 32 temporal channels)
+to ViT-S's 64-channel attention heads. The sum of axis dimensions must equal
+the rotated dimension. Frequencies are generated once over that entire
+dimension, rather than restarting at each axis as in legacy HWT/HWF.
+M-RoPE assigns the first 8 (highest-frequency) rotation pairs to time,
+the next 12 to height, and the last 12 to width. Adjacent channel pairing is
+equivalent to Qwen's half-split pairing under a fixed channel permutation;
+this adaptation uses the repository's existing adjacent-pair convention.
+Reference: https://arxiv.org/abs/2409.12191
 
 Positions are created on the complete tubelet grid before selecting visible
 tokens. The decoder receives coordinates reordered to `[visible, masked]`;
