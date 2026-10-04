@@ -242,7 +242,8 @@ class VisionTransformer(nn.Module):
                  stpe_mix_beta=1.0,
                  rope_rotary_dim=64,
                  tad_gamma=1.0,
-                 temporal_spacing=2.0):
+                 temporal_spacing=2.0,
+                 stpe_estimator="v2"):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -256,13 +257,17 @@ class VisionTransformer(nn.Module):
         self.temporal_spacing = float(temporal_spacing)
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
-        if self.pos_mode == "hwf_v2_rope":
+        if self.pos_mode == "video_rope_f" and stpe_estimator not in ("v1", "v2"):
+            raise ValueError("stpe_estimator must be v1 or v2")
+        if self.pos_mode == "hwf_v2_rope" or (
+            self.pos_mode == "video_rope_f" and stpe_estimator == "v2"
+        ):
             self.stpe = VideoSTPEV2(
                 window_size=stpe_window_size,
                 noise_mode=stpe_noise_mode,
                 mix_beta=stpe_mix_beta,
             )
-        elif self.pos_mode in ("hwf_rope", "hwft_rope"):
+        elif self.pos_mode in ("hwf_rope", "hwft_rope", "video_rope_f"):
             self.stpe = VideoSTPE(
                 window_size=stpe_window_size,
                 noise_mode=stpe_noise_mode,
@@ -334,10 +339,15 @@ class VisionTransformer(nn.Module):
         if self.pos_mode == "original" and self.pos_embed is not None:
             x = x + self.pos_embed.expand(B, -1, -1).type_as(x).to(x.device).clone().detach()
         elif self.pos_mode in BASELINE_POS_MODES:
+            temporal_coordinate = None
+            if self.pos_mode == "video_rope_f":
+                x_grid = x.reshape(B, time_size, height, width, C)
+                temporal_coordinate = self.stpe(x_grid.detach(), masked_pos=None)
             rope_coords = build_baseline_coordinates(
                 self.pos_mode, B, (time_size, height, width), x.device,
                 tad_gamma=self.tad_gamma,
                 temporal_spacing=self.temporal_spacing,
+                temporal_coordinate=temporal_coordinate,
             )
         elif self.pos_mode == "hwt_rope":
             temporal_coordinate = torch.arange(

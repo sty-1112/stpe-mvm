@@ -12,7 +12,7 @@ set -euo pipefail
 
 : "${REPO_DIR:?}" "${PYTHON_BIN:?}" "${RUN_ROOT:?}" "${SPLIT:?}" "${POS_MODE:?}"
 case "$POS_MODE" in
-  vanilla_rope|tad_rope|m_rope|video_rope) ;;
+  vanilla_rope|tad_rope|m_rope|video_rope|video_rope_f) ;;
   *) echo "Unsupported PE baseline: $POS_MODE" >&2; exit 1 ;;
 esac
 read -r -a axis_dims <<< "${ROPE_AXIS_DIMS:-24 24 16}"
@@ -21,8 +21,14 @@ pe_args=(--pos_mode "$POS_MODE" --rope_axis_dims "${axis_dims[@]}"
 if [[ "$POS_MODE" == tad_rope ]]; then
   pe_args+=(--tad_gamma "${TAD_GAMMA:-1}")
 fi
-if [[ "$POS_MODE" == video_rope ]]; then
+if [[ "$POS_MODE" == video_rope || "$POS_MODE" == video_rope_f ]]; then
   pe_args+=(--temporal_spacing "${TEMPORAL_SPACING:-2}")
+fi
+if [[ "$POS_MODE" == video_rope_f ]]; then
+  pe_args+=(--stpe_estimator "${STPE_ESTIMATOR:-v2}"
+            --stpe_window_size "${STPE_WINDOW_SIZE:-5}"
+            --stpe_noise_mode "${STPE_NOISE_MODE:-db4}"
+            --stpe_mix_beta "${STPE_MIX_BETA:-1}")
 fi
 case "$SPLIT" in
   1|2|3) ;;

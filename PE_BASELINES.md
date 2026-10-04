@@ -12,6 +12,7 @@ reproductions of video-language-model benchmark scores. Existing `original`,
 | `tad_rope` | `n + gamma*t` | Global and temporal rotations compose on the same channels |
 | `m_rope` | Grid coordinates `(h,w,t)` | Global frequencies assigned to `t`, then `h`, then `w` |
 | `video_rope` | `(delta*t+h-c_h, delta*t+w-c_w, delta*t)` | Interleaved spatial high frequencies, temporal low frequencies |
+| `video_rope_f` | `(delta*f+h-c_h, delta*f+w-c_w, delta*f)` | Identical frequency allocation to `video_rope` |
 
 New baselines default to `--rope_rotary_dim 64 --rope_theta 10000`.
 Any channels beyond `rope_rotary_dim` remain unchanged. The existing
@@ -50,6 +51,25 @@ There are no text tokens or causal-mask changes in this VideoMAE adaptation.
 References: https://arxiv.org/abs/2502.05173 and
 https://github.com/Wiselnn570/VideoRoPE
 
+VideoRoPE(f) replaces time in all three diagonal coordinates. It calculates
+f once from detached unpositioned PatchEmbed features; during pretraining,
+only tube-mask-visible features contribute, and the encoder and decoder
+reuse the same coordinate. Finetuning and evaluation use all observed
+tokens. Non-tube pretraining masks are rejected by the existing estimator.
+Continuous f is retained in float32 even under mixed precision.
+
+`--stpe_estimator v2` is the default for this new mode and reuses the
+existing `VideoSTPEV2` implementation: f's total span equals raw time's
+span. `--stpe_mix_beta 1` uses the adaptive coordinate; beta=0 exactly
+recovers VideoRoPE(t), and intermediate values mix adaptive and raw time.
+`--stpe_estimator v1` reuses the older HWF `VideoSTPE` estimator, which
+does not guarantee the same total span and ignores the mixing parameter.
+Existing HWF modes retain their original estimator selection and defaults.
+Record the estimator, window size, noise mode, beta and temporal spacing
+when reporting this row. Change only the temporal coordinate when comparing
+VideoRoPE(t) and VideoRoPE(f); keep the same rotary dimension, axis budget,
+theta, spacing, training protocol and evaluation procedure.
+
 Positions are created on the complete tubelet grid before selecting visible
 tokens. The decoder receives coordinates reordered to `[visible, masked]`;
 neither encoder nor decoder renumbers the positions after masking.
@@ -69,6 +89,11 @@ pretraining reconstruction, classification, backward passes, activation
 checkpointing, decoder coordinate ordering, pretrain-to-finetune weight
 transfer, checkpoint save/load and both actual CLI parsers. They do not
 validate CUDA, NCCL, dataset decoding, full-run resource use or accuracy.
+The tests also construct the registered production ViT-S factories with
+training-entrypoint options, exercise CPU bfloat16 autocast, check that
+masked input changes do not affect f, and verify beta=0 recovers VideoRoPE(t)
+in both reconstruction and classification. Both v1 and v2 estimators are
+covered; the v2 coordinate is checked for span preservation.
 
 ## HMDB51 full pipeline
 

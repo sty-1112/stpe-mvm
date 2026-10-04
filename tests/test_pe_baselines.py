@@ -6,19 +6,29 @@ from pathlib import Path
 
 import pytest
 import torch
+from timm.models import create_model
 
 from modeling_finetune import VisionTransformer
 from modeling_pretrain import PretrainVisionTransformer
-from video_rope import BASELINE_POS_MODES, apply_video_rope, build_baseline_coordinates
+from video_rope import BASELINE_POS_MODES, apply_video_rope, build_baseline_coordinates as _build_coordinates
+from stpe_rope import VideoSTPE
+from temporal_pe_v2 import VideoSTPEV2
 
 
 torch.set_num_threads(1)
 
 
+def build_baseline_coordinates(mode, batch_size, grid_size, device, **kwargs):
+    # Coordinate-only generic checks supply f=t; estimator behavior is tested below.
+    if mode == "video_rope_f" and "temporal_coordinate" not in kwargs:
+        kwargs["temporal_coordinate"] = torch.arange(grid_size[0], device=device).float().expand(batch_size, -1)
+    return _build_coordinates(mode, batch_size, grid_size, device, **kwargs)
+
+
 def pretrain_model(mode, **kwargs):
     # Keep ViT-S encoder/decoder head dimensions (64) with a small smoke grid.
     return PretrainVisionTransformer(
-        img_size=32, num_frames=4, patch_size=16, tubelet_size=2,
+        img_size=32, num_frames=kwargs.pop("num_frames", 4), patch_size=16, tubelet_size=2,
         encoder_embed_dim=384, encoder_num_heads=6, encoder_depth=2,
         decoder_embed_dim=192, decoder_num_heads=3, decoder_depth=1,
         qkv_bias=True, pos_mode=mode, rope_axis_dims=(24, 24, 16),
@@ -28,15 +38,15 @@ def pretrain_model(mode, **kwargs):
 
 def finetune_model(mode, **kwargs):
     return VisionTransformer(
-        img_size=32, all_frames=4, patch_size=16, tubelet_size=2,
+        img_size=32, all_frames=kwargs.pop("all_frames", 4), patch_size=16, tubelet_size=2,
         embed_dim=384, num_heads=6, depth=2, num_classes=51,
         qkv_bias=True, pos_mode=mode, rope_axis_dims=(24, 24, 16),
         init_scale=1.0, **kwargs,
     )
 
 
-def tube_mask():
-    return torch.tensor([[False, True, False, True] * 2] * 2)
+def tube_mask(time_size=2):
+    return torch.tensor([[False, True, False, True] * time_size] * 2)
 
 
 def test_vanilla_uses_full_grid_indices():
@@ -157,6 +167,113 @@ def test_videorope_rejects_unequal_spatial_channel_budget():
         apply_video_rope(q, q, coords, "video_rope", axis_dims=(20, 28, 16))
 
 
+def test_video_f_preserves_fractional_positions_in_all_axes():
+    f = torch.tensor([[0., .25, 2.75, 3.], [0., 1., 1.5, 3.]])
+    coords = build_baseline_coordinates("video_rope_f", 2, (4, 2, 2), f.device, temporal_coordinate=f)
+    torch.testing.assert_close(coords[0, 4] - coords[0, 0], torch.tensor([.5, .5, .5]))
+    torch.testing.assert_close(coords[0, 8] - coords[0, 0], torch.tensor([5.5, 5.5, 5.5]))
+    torch.testing.assert_close(coords[1, 4] - coords[1, 0], torch.tensor([2., 2., 2.]))
+    assert coords.dtype == torch.float32
+
+
+def test_video_f_equals_video_t_when_f_is_raw_time():
+    q = torch.randn(2, 3, 16, 64)
+    t = build_baseline_coordinates("video_rope", 2, (4, 2, 2), q.device)
+    f = build_baseline_coordinates("video_rope_f", 2, (4, 2, 2), q.device)
+    torch.testing.assert_close(t, f)
+    qr_t, _ = apply_video_rope(q, q, t, "video_rope")
+    qr_f, _ = apply_video_rope(q, q, f, "video_rope_f")
+    torch.testing.assert_close(qr_t, qr_f)
+
+
+def test_video_f_beta_zero_recovers_pretraining_and_classification():
+    video = torch.randn(2, 3, 8, 32, 32)
+    pt_t = pretrain_model("video_rope", num_frames=8).eval()
+    pt_f = pretrain_model("video_rope_f", num_frames=8, stpe_mix_beta=0.).eval()
+    pt_f.load_state_dict(pt_t.state_dict(), strict=True)
+    ft_t = finetune_model("video_rope", all_frames=8).eval()
+    ft_f = finetune_model("video_rope_f", all_frames=8, stpe_mix_beta=0.).eval()
+    ft_f.load_state_dict(ft_t.state_dict(), strict=True)
+    with torch.no_grad():
+        torch.testing.assert_close(pt_t(video, tube_mask(4)), pt_f(video, tube_mask(4)))
+        torch.testing.assert_close(ft_t(video), ft_f(video))
+
+
+def test_video_f_uses_visible_features_once_and_reuses_decoder_coordinate():
+    pt = pretrain_model("video_rope_f", num_frames=8, stpe_window_size=1, stpe_noise_mode="none")
+    video = torch.randn(2, 3, 8, 32, 32)
+    video[:, :, 4:6] *= 3.
+    video[:, :, 6:8] *= 8.
+    mask = tube_mask(4)
+    observed_f = []
+    decoder_coordinates = []
+    hook_f = pt.encoder.stpe.register_forward_hook(lambda module, args, output: observed_f.append(output.clone()))
+    hook_d = pt.decoder.register_forward_pre_hook(
+        lambda module, args, kwargs: decoder_coordinates.append(kwargs["rope_coords"].clone()), with_kwargs=True
+    )
+    output = pt(video, mask)
+    hook_f.remove()
+    hook_d.remove()
+    assert len(observed_f) == 1 and len(decoder_coordinates) == 1
+    f = observed_f[0]
+    torch.testing.assert_close(f[:, 0], torch.zeros(2))
+    torch.testing.assert_close(f[:, -1], torch.full((2,), 3.))
+    assert torch.all(f[:, 1:] >= f[:, :-1])
+    assert not torch.allclose(f, torch.arange(4).float().expand(2, -1))
+    full = build_baseline_coordinates("video_rope_f", 2, (4, 2, 2), video.device, temporal_coordinate=f)
+    expected = torch.cat((full[~mask].reshape(2, 8, 3), full[mask].reshape(2, 8, 3)), dim=1)
+    torch.testing.assert_close(decoder_coordinates[0], expected)
+    # Masked tubelets occupy the right half of each frame; Conv3d patches do not overlap.
+    changed = video.clone()
+    changed[:, :, :, :, 16:] += 10000.
+    with torch.no_grad():
+        ref_vis, ref_coords = pt.encoder.forward_features(video, mask)
+        changed_vis, changed_coords = pt.encoder.forward_features(changed, mask)
+    torch.testing.assert_close(ref_coords, changed_coords)
+    torch.testing.assert_close(ref_vis, changed_vis)
+    output.square().mean().backward()
+    assert torch.isfinite(pt.encoder.patch_embed.proj.weight.grad).all()
+
+
+def test_video_f_estimator_selection_and_legacy_forward_backward():
+    legacy = pretrain_model("video_rope_f", stpe_estimator="v1", stpe_noise_mode="none")
+    assert type(legacy.encoder.stpe) is VideoSTPE
+    assert isinstance(pretrain_model("video_rope_f").encoder.stpe, VideoSTPEV2)
+    assert type(finetune_model("video_rope_f", stpe_estimator="v1").stpe) is VideoSTPE
+    output = legacy(torch.randn(2, 3, 4, 32, 32), tube_mask())
+    output.square().mean().backward()
+    assert torch.isfinite(output).all()
+    assert torch.isfinite(legacy.decoder.blocks[0].attn.qkv.weight.grad).all()
+
+
+def test_video_f_rejects_non_tube_mask():
+    mask = tube_mask()
+    mask[0, 0], mask[0, 1] = True, False
+    with pytest.raises(ValueError, match="tube masking"):
+        pretrain_model("video_rope_f")(torch.randn(2, 3, 4, 32, 32), mask)
+
+
+@pytest.mark.parametrize("coordinate", [None, torch.zeros(1, 3)])
+def test_video_f_requires_matching_temporal_shape(coordinate):
+    with pytest.raises(ValueError, match="temporal_coordinate"):
+        _build_coordinates("video_rope_f", 2, (2, 2, 2), torch.device("cpu"), temporal_coordinate=coordinate)
+
+
+@pytest.mark.parametrize("mode", BASELINE_POS_MODES)
+def test_cpu_bfloat16_autocast_forward_backward(mode):
+    pt = pretrain_model(mode)
+    ft = finetune_model(mode)
+    video = torch.randn(2, 3, 4, 32, 32)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        reconstruction = pt(video, tube_mask())
+        logits = ft(video)
+        loss = reconstruction.float().square().mean() + torch.nn.functional.cross_entropy(logits.float(), torch.tensor([0, 1]))
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(pt.decoder.blocks[0].attn.qkv.weight.grad).all()
+    assert torch.isfinite(ft.blocks[0].attn.qkv.weight.grad).all()
+
+
 @pytest.mark.parametrize("dims", [(12, 12, 8), (23, 25, 16), (32, 32)])
 def test_mrope_rejects_invalid_dimension_budget(dims):
     q = torch.randn(1, 1, 8, 64)
@@ -231,6 +348,28 @@ def test_checkpoint_roundtrip(mode, tmp_path):
     video = torch.randn(2, 3, 4, 32, 32)
     with torch.no_grad():
         torch.testing.assert_close(model(video, tube_mask()), restored(video, tube_mask()))
+    classifier = finetune_model(mode).eval()
+    torch.save({"model": classifier.state_dict()}, filename)
+    reloaded_classifier = finetune_model(mode).eval()
+    reloaded_classifier.load_state_dict(torch.load(filename, weights_only=True)["model"], strict=True)
+    with torch.no_grad():
+        torch.testing.assert_close(classifier(video), reloaded_classifier(video))
+
+
+@pytest.mark.parametrize("mode", BASELINE_POS_MODES)
+def test_registered_vit_small_factories_accept_training_options(mode):
+    options = dict(pos_mode=mode, rope_rotary_dim=64, rope_axis_dims=(24, 24, 16),
+                   tad_gamma=1., temporal_spacing=2., stpe_estimator="v2")
+    pt = create_model("pretrain_videomae_small_patch16_224", pretrained=False,
+                      drop_block_rate=None, decoder_depth=4, num_frames=16, **options)
+    assert len(pt.encoder.blocks) == 12 and len(pt.decoder.blocks) == 4
+    assert pt.encoder.patch_embed.grid_size == (8, 14, 14)
+    assert pt.encoder.blocks[0].attn.rope_mode == mode
+    assert pt.decoder.blocks[0].attn.rope_mode == mode
+    ft = create_model("vit_small_patch16_224", pretrained=False,
+                      drop_block_rate=None, all_frames=16, num_classes=51, **options)
+    assert len(ft.blocks) == 12 and ft.head.out_features == 51
+    assert ft.blocks[0].attn.rope_mode == mode
 
 
 @pytest.mark.parametrize("entrypoint", ["run_mae_pretraining.py", "run_class_finetuning.py"])
@@ -242,9 +381,10 @@ def test_training_cli_accepts_baseline(entrypoint, mode, monkeypatch):
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_args")
     namespace = {"argparse": argparse, "BASELINE_POS_MODES": BASELINE_POS_MODES}
     exec(compile(ast.Module(body=[function], type_ignores=[]), entrypoint, "exec"), namespace)
-    monkeypatch.setattr("sys.argv", [entrypoint, "--pos_mode", mode, "--rope_rotary_dim", "64", "--tad_gamma", "3", "--temporal_spacing", "1.5"])
+    monkeypatch.setattr("sys.argv", [entrypoint, "--pos_mode", mode, "--rope_rotary_dim", "64", "--tad_gamma", "3", "--temporal_spacing", "1.5", "--stpe_estimator", "v1"])
     parsed = namespace["get_args"]()
     args = parsed[0] if isinstance(parsed, tuple) else parsed
     assert args.pos_mode == mode and args.rope_rotary_dim == 64
     assert args.tad_gamma == 3.
     assert args.temporal_spacing == 1.5
+    assert args.stpe_estimator == "v1"

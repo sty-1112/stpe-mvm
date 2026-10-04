@@ -64,6 +64,7 @@ class PretrainVisionTransformerEncoder(nn.Module):
         rope_rotary_dim=64,
         tad_gamma=1.0,
         temporal_spacing=2.0,
+        stpe_estimator="v2",
     ):
         super().__init__()
 
@@ -88,14 +89,18 @@ class PretrainVisionTransformerEncoder(nn.Module):
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
 
-        # HWF, HWF-V2 and HWFT require an observation-dependent f coordinate.
-        if self.pos_mode == "hwf_v2_rope":
+        # HWF variants and VideoRoPE(f) require an observation-dependent coordinate.
+        if self.pos_mode == "video_rope_f" and stpe_estimator not in ("v1", "v2"):
+            raise ValueError("stpe_estimator must be v1 or v2")
+        if self.pos_mode == "hwf_v2_rope" or (
+            self.pos_mode == "video_rope_f" and stpe_estimator == "v2"
+        ):
             self.stpe = VideoSTPEV2(
                 window_size=stpe_window_size,
                 noise_mode=stpe_noise_mode,
                 mix_beta=stpe_mix_beta,
             )
-        elif self.pos_mode in ("hwf_rope", "hwft_rope"):
+        elif self.pos_mode in ("hwf_rope", "hwft_rope", "video_rope_f"):
             self.stpe = VideoSTPE(
                 window_size=stpe_window_size,
                 noise_mode=stpe_noise_mode,
@@ -237,10 +242,18 @@ class PretrainVisionTransformerEncoder(nn.Module):
             )
 
         elif self.pos_mode in BASELINE_POS_MODES:
+            temporal_coordinate = None
+            if self.pos_mode == "video_rope_f":
+                x_grid = x.reshape(batch_size, time_size, height, width, channels)
+                mask_grid = mask.reshape(batch_size, time_size, height, width)
+                # Compute f once using only visible tube-aligned tokens;
+                # reuse full coordinates in encoder and decoder.
+                temporal_coordinate = self.stpe(x_grid.detach(), masked_pos=mask_grid)
             full_coords = build_baseline_coordinates(
                 self.pos_mode, batch_size, (time_size, height, width), x.device,
                 tad_gamma=self.tad_gamma,
                 temporal_spacing=self.temporal_spacing,
+                temporal_coordinate=temporal_coordinate,
             )
             rope_coords = full_coords[~mask].reshape(
                 batch_size, -1, full_coords.shape[-1]
@@ -630,6 +643,7 @@ class PretrainVisionTransformer(nn.Module):
         rope_rotary_dim=64,
         tad_gamma=1.0,
         temporal_spacing=2.0,
+        stpe_estimator="v2",
         num_classes=0,
         in_chans=0,
     ):
@@ -665,6 +679,7 @@ class PretrainVisionTransformer(nn.Module):
             use_checkpoint=use_checkpoint,
             tad_gamma=tad_gamma,
             temporal_spacing=temporal_spacing,
+            stpe_estimator=stpe_estimator,
             use_learnable_pos_emb=use_learnable_pos_emb,
         )
 

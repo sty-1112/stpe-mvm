@@ -52,6 +52,8 @@ def get_args():
                         help='TAD-RoPE temporal offset multiplier')
     parser.add_argument('--temporal_spacing', default=2.0, type=float,
                         help='VideoRoPE temporal spacing delta')
+    parser.add_argument('--stpe_estimator', default='v2', choices=['v1', 'v2'],
+                        help='f estimator for video_rope_f; v2 preserves total span')
     parser.add_argument('--stpe_window_size', default=5, type=int,
                         help='local window used by the STPE statistic')
     parser.add_argument('--stpe_noise_mode', default='db4', choices=['db4', 'none'],
@@ -341,6 +343,7 @@ def main(args, ds_init):
         rope_rotary_dim=args.rope_rotary_dim,
         tad_gamma=args.tad_gamma,
         temporal_spacing=args.temporal_spacing,
+        stpe_estimator=args.stpe_estimator,
         stpe_window_size=args.stpe_window_size,
         stpe_noise_mode=args.stpe_noise_mode,
         stpe_mix_beta=args.stpe_mix_beta,
