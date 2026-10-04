@@ -11,13 +11,13 @@ import math
 import torch
 
 
-BASELINE_POS_MODES = ("vanilla_rope", "tad_rope", "m_rope")
+BASELINE_POS_MODES = ("vanilla_rope", "tad_rope", "m_rope", "video_rope")
 
 
 def baseline_coordinate_axes(mode: str) -> int:
     if mode not in BASELINE_POS_MODES:
         raise ValueError("Unsupported baseline positional mode: {!r}".format(mode))
-    return 3 if mode == "m_rope" else 1
+    return 3 if mode in ("m_rope", "video_rope") else 1
 
 
 def build_baseline_coordinates(
@@ -26,17 +26,25 @@ def build_baseline_coordinates(
     grid_size: Sequence[int],
     device: torch.device,
     tad_gamma: float = 1.0,
+    temporal_spacing: float = 2.0,
 ) -> torch.Tensor:
     """Return [B,T*H*W,A] positions, without renumbering visible tokens."""
     baseline_coordinate_axes(mode)
     if len(grid_size) != 3 or any(int(size) <= 0 for size in grid_size):
         raise ValueError("grid_size must contain three positive sizes (T,H,W)")
     time_size, height, width = (int(size) for size in grid_size)
-    if mode == "m_rope":
+    if mode in ("m_rope", "video_rope"):
         time = torch.arange(time_size, device=device, dtype=torch.float32)
         h = torch.arange(height, device=device, dtype=torch.float32)
         w = torch.arange(width, device=device, dtype=torch.float32)
         time, h, w = torch.meshgrid(time, h, w, indexing="ij")
+        if mode == "video_rope":
+            if not math.isfinite(float(temporal_spacing)) or float(temporal_spacing) <= 0:
+                raise ValueError("temporal_spacing must be finite and positive")
+            time = float(temporal_spacing) * time
+            # Match the official implementation's integer center offsets.
+            h = time + h - (height - 1) // 2
+            w = time + w - (width - 1) // 2
         # Coordinate storage remains (h,w,t); frequency assignment is (t,h,w).
         return torch.stack((h, w, time), dim=-1).reshape(1, -1, 3).expand(batch_size, -1, -1)
     positions = torch.arange(
@@ -79,14 +87,19 @@ def apply_video_rope(
         / float(rotary_dim)
     )
     positions = coordinates.to(device=q.device, dtype=torch.float32)
-    if mode == "m_rope":
+    if mode in ("m_rope", "video_rope"):
         axis_dims = tuple(int(dim) for dim in axis_dims)
         if len(axis_dims) != 3 or any(dim <= 0 or dim % 2 for dim in axis_dims):
             raise ValueError("baseline axis_dims must be three positive even integers (h,w,t)")
         if sum(axis_dims) != rotary_dim:
             raise ValueError("sum(axis_dims) must equal rope_rotary_dim for 3D baselines")
         h_pairs, w_pairs, t_pairs = (dim // 2 for dim in axis_dims)
-        pair_axes = [2] * t_pairs + [0] * h_pairs + [1] * w_pairs
+        if mode == "m_rope":
+            pair_axes = [2] * t_pairs + [0] * h_pairs + [1] * w_pairs
+        else:
+            if h_pairs != w_pairs:
+                raise ValueError("VideoRoPE requires equal h/w dimensions for spatial interleaving")
+            pair_axes = [0, 1] * h_pairs + [2] * t_pairs
         angles = positions[..., pair_axes] * frequencies
     else:
         angles = positions[..., 0:1] * frequencies

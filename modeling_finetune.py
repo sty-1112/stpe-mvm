@@ -241,7 +241,8 @@ class VisionTransformer(nn.Module):
                  stpe_noise_mode="db4",
                  stpe_mix_beta=1.0,
                  rope_rotary_dim=64,
-                 tad_gamma=1.0):
+                 tad_gamma=1.0,
+                 temporal_spacing=2.0):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -252,6 +253,7 @@ class VisionTransformer(nn.Module):
         self.use_checkpoint = use_checkpoint
         self.pos_mode = validate_finetune_pos_mode(pos_mode)
         self.tad_gamma = float(tad_gamma)
+        self.temporal_spacing = float(temporal_spacing)
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
         if self.pos_mode == "hwf_v2_rope":
@@ -335,6 +337,7 @@ class VisionTransformer(nn.Module):
             rope_coords = build_baseline_coordinates(
                 self.pos_mode, B, (time_size, height, width), x.device,
                 tad_gamma=self.tad_gamma,
+                temporal_spacing=self.temporal_spacing,
             )
         elif self.pos_mode == "hwt_rope":
             temporal_coordinate = torch.arange(

@@ -11,6 +11,7 @@ reproductions of video-language-model benchmark scores. Existing `original`,
 | `vanilla_rope` | Full-grid flattened index `n = t*H*W + h*W + w` | All global RoPE frequencies use `n` |
 | `tad_rope` | `n + gamma*t` | Global and temporal rotations compose on the same channels |
 | `m_rope` | Grid coordinates `(h,w,t)` | Global frequencies assigned to `t`, then `h`, then `w` |
+| `video_rope` | `(delta*t+h-c_h, delta*t+w-c_w, delta*t)` | Interleaved spatial high frequencies, temporal low frequencies |
 
 New baselines default to `--rope_rotary_dim 64 --rope_theta 10000`.
 Any channels beyond `rope_rotary_dim` remain unchanged. The existing
@@ -36,6 +37,18 @@ the next 12 to height, and the last 12 to width. Adjacent channel pairing is
 equivalent to Qwen's half-split pairing under a fixed channel permutation;
 this adaptation uses the repository's existing adjacent-pair convention.
 Reference: https://arxiv.org/abs/2409.12191
+
+VideoRoPE follows the ICML 2025 paper and its official implementation:
+Low-frequency Temporal Allocation, Diagonal Layout and Adjustable Temporal
+Spacing. With axis dims `(24,24,16)`, the first 24 rotation pairs alternate
+height/width, and the last 8 pairs encode time. Spatial dimensions must be
+equal for this interleaving. `--temporal_spacing` defaults to 2, as in the
+official code. `c_h=(H-1)//2`, `c_w=(W-1)//2` also follow that code.
+The spatial coordinates include the temporal offset, so corresponding
+patches in successive frames move along all three positional axes.
+There are no text tokens or causal-mask changes in this VideoMAE adaptation.
+References: https://arxiv.org/abs/2502.05173 and
+https://github.com/Wiselnn570/VideoRoPE
 
 Positions are created on the complete tubelet grid before selecting visible
 tokens. The decoder receives coordinates reordered to `[visible, masked]`;

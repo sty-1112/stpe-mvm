@@ -106,6 +106,57 @@ def test_mrope_equal_axis_positions_reduce_to_vanilla():
     torch.testing.assert_close(mrope, vanilla)
 
 
+def test_videorope_diagonal_layout_and_spacing():
+    coords = build_baseline_coordinates("video_rope", 1, (2, 3, 3), torch.device("cpu"), temporal_spacing=1.5)
+    torch.testing.assert_close(coords[0, 4], torch.tensor([0., 0., 0.]))
+    torch.testing.assert_close(coords[0, 13], torch.tensor([1.5, 1.5, 1.5]))
+    torch.testing.assert_close(coords[0, 9] - coords[0, 0], torch.tensor([1.5, 1.5, 1.5]))
+    torch.testing.assert_close(coords[0, 0], torch.tensor([-1., -1., 0.]))
+
+
+def test_videorope_interleaved_spatial_and_low_frequency_time_reference():
+    q = torch.randn(2, 3, 8, 64)
+    coords = build_baseline_coordinates("video_rope", 2, (2, 2, 2), q.device)
+    actual, _ = apply_video_rope(q, q, coords, "video_rope")
+    expected = q.clone()
+    axes = [0, 1] * 12 + [2] * 8
+    for pair, axis in enumerate(axes):
+        angle = coords[..., axis].unsqueeze(1) / (10000.0 ** (2 * pair / 64))
+        a, b = q[..., 2 * pair], q[..., 2 * pair + 1]
+        expected[..., 2 * pair] = a * angle.cos() - b * angle.sin()
+        expected[..., 2 * pair + 1] = a * angle.sin() + b * angle.cos()
+    torch.testing.assert_close(actual, expected)
+
+
+def test_videorope_spacing_reaches_encoder_and_classifier():
+    video = torch.randn(2, 3, 4, 32, 32)
+    pt = pretrain_model("video_rope", temporal_spacing=3.5)
+    _, coords = pt.encoder.forward_features(video, tube_mask())
+    expected = build_baseline_coordinates("video_rope", 2, (2, 2, 2), video.device, temporal_spacing=3.5)
+    torch.testing.assert_close(coords, expected)
+    ft = finetune_model("video_rope", temporal_spacing=3.5)
+    captured = {}
+    def capture(module, args):
+        captured["coords"] = args[1]
+    hook = ft.blocks[0].register_forward_pre_hook(capture)
+    ft(video)
+    hook.remove()
+    torch.testing.assert_close(captured["coords"], expected)
+
+
+@pytest.mark.parametrize("spacing", [0., -1., float("nan"), float("inf")])
+def test_videorope_rejects_invalid_spacing(spacing):
+    with pytest.raises(ValueError):
+        build_baseline_coordinates("video_rope", 1, (2, 2, 2), torch.device("cpu"), temporal_spacing=spacing)
+
+
+def test_videorope_rejects_unequal_spatial_channel_budget():
+    q = torch.randn(1, 1, 8, 64)
+    coords = build_baseline_coordinates("video_rope", 1, (2, 2, 2), q.device)
+    with pytest.raises(ValueError, match="equal h/w"):
+        apply_video_rope(q, q, coords, "video_rope", axis_dims=(20, 28, 16))
+
+
 @pytest.mark.parametrize("dims", [(12, 12, 8), (23, 25, 16), (32, 32)])
 def test_mrope_rejects_invalid_dimension_budget(dims):
     q = torch.randn(1, 1, 8, 64)
@@ -191,8 +242,9 @@ def test_training_cli_accepts_baseline(entrypoint, mode, monkeypatch):
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_args")
     namespace = {"argparse": argparse, "BASELINE_POS_MODES": BASELINE_POS_MODES}
     exec(compile(ast.Module(body=[function], type_ignores=[]), entrypoint, "exec"), namespace)
-    monkeypatch.setattr("sys.argv", [entrypoint, "--pos_mode", mode, "--rope_rotary_dim", "64", "--tad_gamma", "3"])
+    monkeypatch.setattr("sys.argv", [entrypoint, "--pos_mode", mode, "--rope_rotary_dim", "64", "--tad_gamma", "3", "--temporal_spacing", "1.5"])
     parsed = namespace["get_args"]()
     args = parsed[0] if isinstance(parsed, tuple) else parsed
     assert args.pos_mode == mode and args.rope_rotary_dim == 64
     assert args.tad_gamma == 3.
+    assert args.temporal_spacing == 1.5

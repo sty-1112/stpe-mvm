@@ -63,6 +63,7 @@ class PretrainVisionTransformerEncoder(nn.Module):
         stpe_mix_beta=1.0,
         rope_rotary_dim=64,
         tad_gamma=1.0,
+        temporal_spacing=2.0,
     ):
         super().__init__()
 
@@ -83,6 +84,7 @@ class PretrainVisionTransformerEncoder(nn.Module):
         self.use_checkpoint = use_checkpoint
         self.pos_mode = validate_pos_mode(pos_mode)
         self.tad_gamma = float(tad_gamma)
+        self.temporal_spacing = float(temporal_spacing)
         self.rope_axis_dims = tuple(rope_axis_dims)
         self.rope_theta = float(rope_theta)
 
@@ -238,6 +240,7 @@ class PretrainVisionTransformerEncoder(nn.Module):
             full_coords = build_baseline_coordinates(
                 self.pos_mode, batch_size, (time_size, height, width), x.device,
                 tad_gamma=self.tad_gamma,
+                temporal_spacing=self.temporal_spacing,
             )
             rope_coords = full_coords[~mask].reshape(
                 batch_size, -1, full_coords.shape[-1]
@@ -626,6 +629,7 @@ class PretrainVisionTransformer(nn.Module):
         stpe_mix_beta=1.0,
         rope_rotary_dim=64,
         tad_gamma=1.0,
+        temporal_spacing=2.0,
         num_classes=0,
         in_chans=0,
     ):
@@ -660,6 +664,7 @@ class PretrainVisionTransformer(nn.Module):
             rope_rotary_dim=rope_rotary_dim,
             use_checkpoint=use_checkpoint,
             tad_gamma=tad_gamma,
+            temporal_spacing=temporal_spacing,
             use_learnable_pos_emb=use_learnable_pos_emb,
         )
 
