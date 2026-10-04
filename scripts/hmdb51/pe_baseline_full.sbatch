@@ -39,7 +39,7 @@ cd "$REPO_DIR"
 export OMP_NUM_THREADS=1 PYTHONUNBUFFERED=1
 unset CUDA_LAUNCH_BLOCKING
 
-data_dir=/project/cse/b167368/sty/stpe-mvm/data/hmdb51/lists/split${SPLIT}
+data_dir=${DATA_ROOT:-/project/cse/b167368/sty/stpe-mvm/data/hmdb51/lists}/split${SPLIT}
 for name in train val test; do
   test -s "$data_dir/$name.csv" || {
     echo "Missing: $data_dir/$name.csv" >&2
@@ -81,6 +81,10 @@ ft_best="$ft_dir/checkpoint-best.pth"
 
 # torchrun 负责创建 rank 0/1；避免 Slurm 的单 task rank 覆盖它们。
 run_ddp() {
+  # Record the exact arguments for every resumed or newly started stage.
+  printf 'COMMAND '
+  printf '%q ' "$PYTHON_BIN" -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=2 "$@"
+  printf '\n'
   env -u SLURM_PROCID -u SLURM_LOCALID -u SLURM_NTASKS \
     "$PYTHON_BIN" -m torch.distributed.run \
     --standalone --nnodes=1 --nproc_per_node=2 "$@"

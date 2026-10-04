@@ -121,3 +121,117 @@ sbatch --export=ALL \
 ```
 
 No cluster jobs are submitted by implementation or smoke testing.
+
+## Five jobs, three splits per 72h allocation
+
+`scripts/hmdb51/pe_baselines_3splits_72h.sbatch` takes exactly one PE mode
+as its argument. Each job runs split1 pretrain -> finetune -> independent
+evaluation, then split2, then split3. It calls the single-split helper with
+`bash` inside the same allocation; the helper's 24h SBATCH header is a
+comment in this context. It does not submit nested jobs.
+
+The resource request is 72h, one node, one Slurm task, 32 CPUs, 128G host
+memory and two H200s. The script retains reservation `cse_gpu` and the
+previous temporary exclusion of `chpc-gpu033`. Override reservation or
+exclude at submission if the site's 72h queue requires it. Project notes
+verify `cse_24h` only, so the new script deliberately leaves the partition
+to `sbatch --partition`. Verify the actual partition and whether it admits
+the requested reservation, GPU type and time limit on the cluster.
+
+Default paths are the successful project paths:
+
+| Variable | Default / requirement |
+| --- | --- |
+| `REPO_DIR` | `/project/cse/b167368/sty/stpe-mvm/VideoMAE` |
+| `PYTHON_BIN` | `/project/cse/b167368/sty/stpe-video/envs/videomae/bin/python` |
+| `DATA_ROOT` | `/project/cse/b167368/sty/stpe-mvm/data/hmdb51/lists` |
+| `RUN_ROOT` | Required; export one new root shared by the five jobs |
+
+Keep Slurm's `CUDA_VISIBLE_DEVICES`. Two ranks are created only by
+`torchrun --standalone --nnodes=1 --nproc_per_node=2`, after removing
+`SLURM_PROCID`, `SLURM_LOCALID` and `SLURM_NTASKS` from its environment.
+Per-rank DataLoader workers remain 8 and OMP threads remain 1. The
+4800/50-epoch protocol, per-rank batches 96/32, FT update_freq=2,
+16 frames with sampling_rate=2 and 10-segment/3-crop evaluation are
+unchanged. The PE defaults are `(h,w,t/f)=(24,24,16)`, rotary dimension
+64, theta 10000, TAD gamma 1, VideoRoPE spacing 2, and VideoRoPE(f)
+estimator v2/window 5/db4/beta 1. Set the corresponding environment
+variables described in the single-split helper before submitting if needed.
+
+On the cluster, preserve local changes before switching to `baseline`
+and pulling it. Use a new RUN_ROOT for this experiment. First inspect
+the available partition names and time limits; replace
+`YOUR_72H_PARTITION` below with the real name.
+
+```bash
+cd /project/cse/b167368/sty/stpe-mvm/VideoMAE
+git fetch origin
+git switch baseline
+git pull --ff-only origin baseline
+
+export REPO_DIR="$PWD"
+export PYTHON_BIN=/project/cse/b167368/sty/stpe-video/envs/videomae/bin/python
+export DATA_ROOT=/project/cse/b167368/sty/stpe-mvm/data/hmdb51/lists
+export RUN_ROOT=/project/cse/b167368/sty/stpe-mvm/outputs/pe_baselines_3splits_$(date +%Y%m%d_%H%M%S)
+LOG_ROOT=/project/cse/b167368/sty/stpe-mvm/logs/hmdb51
+mkdir -p "$LOG_ROOT"
+printf 'RUN_ROOT=%s\n' "$RUN_ROOT"
+sinfo -h -o '%P %l %G'
+export PARTITION_72H=YOUR_72H_PARTITION
+
+job_script=scripts/hmdb51/pe_baselines_3splits_72h.sbatch
+sbatch_args=(--partition="$PARTITION_72H" --export=ALL
+             --output="$LOG_ROOT/%x_%j.out" --error="$LOG_ROOT/%x_%j.err")
+sbatch --test-only "${sbatch_args[@]}" "$job_script" vanilla_rope
+
+sbatch "${sbatch_args[@]}" --job-name=hmdb51_vanilla_3s "$job_script" vanilla_rope
+sbatch "${sbatch_args[@]}" --job-name=hmdb51_tad_3s "$job_script" tad_rope
+sbatch "${sbatch_args[@]}" --job-name=hmdb51_mrope_3s "$job_script" m_rope
+sbatch "${sbatch_args[@]}" --job-name=hmdb51_videorope_3s "$job_script" video_rope
+sbatch "${sbatch_args[@]}" --job-name=hmdb51_videorope_f_3s "$job_script" video_rope_f
+```
+
+`sbatch --test-only` checks scheduling feasibility without submitting a
+job; it does not run data/GPU preflight. Only run the five actual
+submission commands after that check succeeds. Five jobs request ten
+H200s in total if scheduled simultaneously; available quota may queue
+them. The known HWT cost is about 15-17h per split (45-51h for three),
+but the new PE methods' throughput has not been measured on H200.
+The 72h request is a budget, not a guarantee of completion.
+
+Outputs are `$RUN_ROOT/<mode>/split{1,2,3}/{pretrain,finetune,evaluation}`.
+The wrapper preflights all nine lists and listed video paths (existence
+and readability only; no decoding). It saves PE/protocol settings,
+list/code SHA256 fingerprints, commit/local diff, script copies and Slurm
+job details under `<mode>/jobs/<job_id>/`. A per-mode lock prevents two
+jobs from writing to the same experiment simultaneously. Keep the source
+tree unchanged while the jobs run: the fingerprint is a provenance and
+resume guard, not a separate checkout of the code.
+
+To resume after interruption or a time limit, export the **same**
+RUN_ROOT and resubmit only the affected mode with the same options.
+Completed stages are skipped; unfinished training uses auto_resume.
+Changing a tracked training source, a list, or PE options is rejected;
+use a fresh RUN_ROOT for a new trial. Each completed split must have
+PT checkpoint-4799, FT checkpoint-49 and checkpoint-best with matching
+PE/frame/sampling settings, plus valid merged independent evaluation
+metrics. Best checkpoints use `epoch="best"` as saved by this repository.
+The script stops on a failed stage or validation, before the next split.
+
+After all three splits, `<mode>/results.json` and `results.csv` contain
+split Top-1/Top-5 and their arithmetic means. Only
+`splitX/evaluation/log.txt` is used, never the final-model test results
+inside the finetuning log. A successful wrapper prints
+`COMPLETE_3SPLITS`; also verify the Slurm state and exit code.
+
+The orchestration smoke tests use simulated GPU checks and training
+processes, real PyTorch checkpoint serialization and the actual CLI
+parsers. They cover all five modes, nine-stage ordering, output isolation,
+stage skipping, recovery after failure, configuration mismatch, missing
+data, task-count mistakes, concurrent writes and final metric checks:
+
+```bash
+python -m pytest -q tests/test_hmdb51_72h_script.py
+bash -n scripts/hmdb51/pe_baseline_full.sbatch
+bash -n scripts/hmdb51/pe_baselines_3splits_72h.sbatch
+```
